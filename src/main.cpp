@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_netif.h>
@@ -6,6 +7,7 @@
 #include <esp_eth.h>
 #include <esp_eth_mac_spi.h>
 #include <esp_eth_phy.h>
+#include <esp_wifi.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>
 
