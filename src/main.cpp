@@ -21,14 +21,14 @@ static constexpr char TAG[] = "ethernet";
 // ── Network config ───────────────────────────────────────────────────────────
 static uint8_t macAddress[] = {0x02, 0x32, 0x53, 0x55, 0x00, 0x01};
 
-static esp_netif_t        *s_eth_netif  = nullptr;
-static esp_eth_handle_t    s_eth_handle = nullptr;
-static volatile bool       s_got_ip     = false;
-static volatile bool       s_link_up    = false;
+static esp_netif_t *s_eth_netif = nullptr;
+static esp_eth_handle_t s_eth_handle = nullptr;
+static volatile bool s_got_ip = false;
+static volatile bool s_link_up = false;
 
 // Structs que el driver esp_eth referencia por puntero — deben vivir en global
-static spi_device_interface_config_t s_devcfg  = {};
-static eth_w5500_config_t            s_w5500_cfg = {};
+static spi_device_interface_config_t s_devcfg = {};
+static eth_w5500_config_t s_w5500_cfg = {};
 
 // ── Event handlers ───────────────────────────────────────────────────────────
 static void eth_event_handler(void *, esp_event_base_t, int32_t event_id, void *)
@@ -117,21 +117,21 @@ void setup()
   gpio_install_isr_service(0);
 
   // Dispositivo SPI del W5500
-  s_devcfg.command_bits   = 16;
-  s_devcfg.address_bits   = 8;
-  s_devcfg.mode           = 0;
+  s_devcfg.command_bits = 16;
+  s_devcfg.address_bits = 8;
+  s_devcfg.mode = 0;
   s_devcfg.clock_speed_hz = 20 * 1000 * 1000; // 20 MHz
-  s_devcfg.spics_io_num   = W5500_CS;
-  s_devcfg.queue_size     = 20;
+  s_devcfg.spics_io_num = W5500_CS;
+  s_devcfg.queue_size = 20;
 
   // Configuración MAC W5500
   // int_gpio_num y poll_period_ms son mutuamente excluyentes:
   //   int_gpio_num >= 0  →  modo interrupción  (poll_period_ms debe ser 0)
   //   int_gpio_num == -1 →  modo polling       (poll_period_ms > 0)
-  s_w5500_cfg.spi_host_id     = ETH_SPI_HOST;
-  s_w5500_cfg.spi_devcfg      = &s_devcfg;
-  s_w5500_cfg.int_gpio_num    = W5500_INT;
-  s_w5500_cfg.poll_period_ms  = (W5500_INT == GPIO_NUM_NC) ? 10 : 0;
+  s_w5500_cfg.spi_host_id = ETH_SPI_HOST;
+  s_w5500_cfg.spi_devcfg = &s_devcfg;
+  s_w5500_cfg.int_gpio_num = W5500_INT;
+  s_w5500_cfg.poll_period_ms = (W5500_INT == GPIO_NUM_NC) ? 10 : 0;
   s_w5500_cfg.custom_spi_driver = ETH_DEFAULT_SPI;
 
   eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
