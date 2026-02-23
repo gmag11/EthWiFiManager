@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <esp_log.h>
+#include <esp_mac.h>
 #include <esp_netif.h>
 #include <esp_event.h>
 #include <esp_eth.h>
@@ -14,12 +15,14 @@ constexpr gpio_num_t W5500_SCK = GPIO_NUM_13;
 constexpr gpio_num_t W5500_MISO = GPIO_NUM_12;
 constexpr gpio_num_t W5500_MOSI = GPIO_NUM_11;
 constexpr gpio_num_t W5500_CS = GPIO_NUM_14;
-constexpr gpio_num_t W5500_INT = GPIO_NUM_10; // sin pin de interrupción
+constexpr gpio_num_t W5500_INT = GPIO_NUM_10;
 
 static constexpr char TAG[] = "ethernet";
 
 // ── Network config ───────────────────────────────────────────────────────────
-static uint8_t macAddress[] = {0x02, 0x32, 0x53, 0x55, 0x00, 0x01};
+// MAC se calcula en setup() con esp_read_mac(ESP_MAC_ETH):
+// en ESP32-S3 deriva local_mac(base+1), con bit L/A activo → no colisiona con BT
+static uint8_t macAddress[6] = {};
 
 static esp_netif_t *s_eth_netif = nullptr;
 static esp_eth_handle_t s_eth_handle = nullptr;
@@ -147,7 +150,12 @@ void setup()
   esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
   ESP_ERROR_CHECK(esp_eth_driver_install(&eth_cfg, &s_eth_handle));
 
-  // Fijar dirección MAC
+  // ESP_MAC_ETH en ESP32-S3 genera local_mac(base+1): activa el bit L/A (byte0 |= 0x02)
+  // → dirección locally administered, distinta de STA (universal) y BT (base+1, universal)
+  ESP_ERROR_CHECK(esp_read_mac(macAddress, ESP_MAC_ETH));
+  ESP_LOGI(TAG, "MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+           macAddress[0], macAddress[1], macAddress[2],
+           macAddress[3], macAddress[4], macAddress[5]);
   ESP_ERROR_CHECK(esp_eth_ioctl(s_eth_handle, ETH_CMD_S_MAC_ADDR, macAddress));
 
   // Conectar netif al driver
