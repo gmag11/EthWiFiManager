@@ -40,7 +40,11 @@ static void eth_event_handler(void *, esp_event_base_t, int32_t event_id, void *
   {
   case ETHERNET_EVENT_CONNECTED:
     s_link_up = true;
-    ESP_LOGI(TAG, "Link: UP");
+    s_got_ip = false;
+    ESP_LOGI(TAG, "Link: UP — (re)iniciando DHCP...");
+    // Reiniciar el cliente DHCP en cada conexión (boot o hot-plug)
+    esp_netif_dhcpc_stop(s_eth_netif); // ignorar si ya estaba parado
+    esp_netif_dhcpc_start(s_eth_netif);
     break;
   case ETHERNET_EVENT_DISCONNECTED:
     s_link_up = false;
@@ -162,26 +166,9 @@ void setup()
   esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
   ESP_ERROR_CHECK(esp_netif_attach(s_eth_netif, glue));
 
-  // Arrancar Ethernet
+  // Arrancar Ethernet (DHCP se lanzará automáticamente al subir el link)
   ESP_LOGI(TAG, "Iniciando Ethernet...");
   ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
-
-  // Esperar IP por DHCP (10 s)
-  ESP_LOGI(TAG, "Esperando dirección DHCP...");
-  uint32_t t0 = millis();
-  while (!s_got_ip && (millis() - t0) < 10000)
-    delay(100);
-
-  if (!s_got_ip)
-  {
-    ESP_LOGW(TAG, "DHCP timeout, aplicando IP estática de fallback");
-    esp_netif_dhcpc_stop(s_eth_netif);
-    esp_netif_ip_info_t fallback = {};
-    IP4_ADDR(&fallback.ip, 192, 168, 1, 180);
-    IP4_ADDR(&fallback.netmask, 255, 255, 255, 0);
-    IP4_ADDR(&fallback.gw, 192, 168, 1, 1);
-    ESP_ERROR_CHECK(esp_netif_set_ip_info(s_eth_netif, &fallback));
-  }
 
   printNetworkInfo();
 }
