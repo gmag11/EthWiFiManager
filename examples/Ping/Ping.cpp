@@ -43,7 +43,7 @@ static void startPing()
 {
   if (s_pingInProgress)
     return;
-  if (network.localIP() == IPAddress(0U))
+  if (network.localIP() == IPAddress(0, 0, 0, 0))
     return; // no network yet
 
   // Resolve hostname via DNS
