@@ -39,7 +39,7 @@ bool EthWiFiManager::begin(const Config &config)
     if (m_config.ethernet.enabled)
     {
         bool ethernetOk = true;
-#if CONFIG_ETH_USE_ESP32_EMAC
+#if ETHWIFI_INTERNAL_EMAC
         if (m_config.ethernet.mode == EthernetMode::Spi)
 #endif
         {
@@ -278,6 +278,7 @@ bool EthWiFiManager::probeSpiModule()
 
     switch (eth.spiModule)
     {
+#if ETHWIFI_DM9051
     case SpiModule::DM9051:
         // Read PIDL register (0x28). DM9051 SPI frame: bit7=R/W, bits[6:0]=addr
         // Read command: 0x80 | 0x28 = 0xA8. Response: rx[1] = PIDL (expected 0x51)
@@ -292,7 +293,8 @@ bool EthWiFiManager::probeSpiModule()
             ESP_LOGI(m_config.logTag, "DM9051 probe: PIDL=0x%02X -> %s", rx[1], found ? "found" : "not found");
         }
         break;
-
+#endif // ETHWIFI_DM9051
+#if ETHWIFI_KSZ8851SNL
     case SpiModule::KSZ8851SNL:
         // Read CIDER register (0xC0): 16-bit header = SOP(read)=0b10 | BE=0b1111 | addr=0xC0>>2=0x30
         // Header = 0b10_1111_0011_0000_00 = 0xBCC0
@@ -309,9 +311,9 @@ bool EthWiFiManager::probeSpiModule()
                      rx[2], rx[3], found ? "found" : "not found");
         }
         break;
-
+#endif // ETHWIFI_KSZ8851SNL
+#if ETHWIFI_W5500
     case SpiModule::W5500:
-    default:
         // Read VERSIONR: address 0x0039, common block (BSB=0), read (RWB=0), VDM → control=0x00
         // Expected value: 0x04
         tx[0] = 0x00; tx[1] = 0x39; tx[2] = 0x00; tx[3] = 0x00;
@@ -324,6 +326,10 @@ bool EthWiFiManager::probeSpiModule()
             found = (rx[3] == 0x04);
             ESP_LOGI(m_config.logTag, "W5500 probe: VERSIONR=0x%02X -> %s", rx[3], found ? "found" : "not found");
         }
+        break;
+#endif // ETHWIFI_W5500
+    default:
+        ESP_LOGE(m_config.logTag, "Selected SPI module is not compiled in (check ETHWIFI_NO_* build flags)");
         break;
     }
 
@@ -365,7 +371,7 @@ bool EthWiFiManager::initEthernet()
     esp_eth_mac_t *mac = nullptr;
     esp_eth_phy_t *phy = nullptr;
 
-#if CONFIG_ETH_USE_ESP32_EMAC
+#if ETHWIFI_INTERNAL_EMAC
     if (m_config.ethernet.mode == EthernetMode::InternalEmac)
     {
         // ---- Internal RMII EMAC (ESP32 classic) ----
@@ -402,7 +408,7 @@ bool EthWiFiManager::initEthernet()
         }
     }
     else
-#endif // CONFIG_ETH_USE_ESP32_EMAC
+#endif // ETHWIFI_INTERNAL_EMAC
     {
         // ---- SPI Ethernet module ----
         spi_bus_config_t busCfg = {};
@@ -435,19 +441,27 @@ bool EthWiFiManager::initEthernet()
         // Each chip uses different SPI frame encoding (command/address phase layout)
         switch (m_config.ethernet.spiModule)
         {
+#if ETHWIFI_DM9051
         case SpiModule::DM9051:
             m_spiDevCfg.command_bits = 1;
             m_spiDevCfg.address_bits = 7;
             break;
+#endif
+#if ETHWIFI_KSZ8851SNL
         case SpiModule::KSZ8851SNL:
             m_spiDevCfg.command_bits = 16;
             m_spiDevCfg.address_bits = 0;
             break;
+#endif
+#if ETHWIFI_W5500
         case SpiModule::W5500:
-        default:
             m_spiDevCfg.command_bits = 16;
             m_spiDevCfg.address_bits = 8;
             break;
+#endif
+        default:
+            ESP_LOGE(m_config.logTag, "Selected SPI module is not compiled in (check ETHWIFI_NO_* build flags)");
+            return false;
         }
 
         err = spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &m_spiHandle);
@@ -464,7 +478,7 @@ bool EthWiFiManager::initEthernet()
 
         switch (m_config.ethernet.spiModule)
         {
-#if CONFIG_ETH_SPI_ETHERNET_DM9051
+#if ETHWIFI_DM9051
         case SpiModule::DM9051:
         {
             eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(m_spiHandle);
@@ -475,8 +489,8 @@ bool EthWiFiManager::initEthernet()
                 ESP_LOGE(m_config.logTag, "DM9051 MAC/PHY init failed");
             break;
         }
-#endif
-#if CONFIG_ETH_SPI_ETHERNET_KSZ8851SNL
+#endif // ETHWIFI_DM9051
+#if ETHWIFI_KSZ8851SNL
         case SpiModule::KSZ8851SNL:
         {
             eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(m_spiHandle);
@@ -487,9 +501,9 @@ bool EthWiFiManager::initEthernet()
                 ESP_LOGE(m_config.logTag, "KSZ8851SNL MAC/PHY init failed");
             break;
         }
-#endif
+#endif // ETHWIFI_KSZ8851SNL
+#if ETHWIFI_W5500
         case SpiModule::W5500:
-        default:
         {
             eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_spiHandle);
             w5500Cfg.int_gpio_num = m_config.ethernet.intPin;
@@ -499,6 +513,10 @@ bool EthWiFiManager::initEthernet()
                 ESP_LOGE(m_config.logTag, "W5500 MAC/PHY init failed");
             break;
         }
+#endif // ETHWIFI_W5500
+        default:
+            ESP_LOGE(m_config.logTag, "Selected SPI module is not compiled in (check ETHWIFI_NO_* build flags)");
+            break;
         }
 
         if (mac == nullptr || phy == nullptr)

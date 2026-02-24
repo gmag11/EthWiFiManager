@@ -14,6 +14,37 @@
 
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
+#include <sdkconfig.h>
+
+// ── EthWiFiManager per-module feature flags ───────────────────────────────────
+// Each Ethernet backend is enabled by default when the underlying ESP-IDF
+// Kconfig supports it. Opt out of individual backends to save flash by passing
+// -DETHWIFI_NO_W5500, -DETHWIFI_NO_DM9051, -DETHWIFI_NO_KSZ8851SNL, or
+// -DETHWIFI_NO_INTERNAL_EMAC via build_flags in platformio.ini.
+//
+// Example (save ~10 KB by disabling unused SPI modules):
+//   build_flags = -DETHWIFI_NO_DM9051 -DETHWIFI_NO_KSZ8851SNL
+// ─────────────────────────────────────────────────────────────────────────────
+#if defined(CONFIG_ETH_SPI_ETHERNET_W5500) && !defined(ETHWIFI_NO_W5500)
+  #define ETHWIFI_W5500 1
+#endif
+#if defined(CONFIG_ETH_SPI_ETHERNET_DM9051) && !defined(ETHWIFI_NO_DM9051)
+  #define ETHWIFI_DM9051 1
+#endif
+#if defined(CONFIG_ETH_SPI_ETHERNET_KSZ8851SNL) && !defined(ETHWIFI_NO_KSZ8851SNL)
+  #define ETHWIFI_KSZ8851SNL 1
+#endif
+#if defined(CONFIG_ETH_USE_ESP32_EMAC) && !defined(ETHWIFI_NO_INTERNAL_EMAC)
+  #define ETHWIFI_INTERNAL_EMAC 1
+#endif
+
+#if !defined(ETHWIFI_W5500) && !defined(ETHWIFI_DM9051) && \
+    !defined(ETHWIFI_KSZ8851SNL) && !defined(ETHWIFI_INTERNAL_EMAC)
+  #pragma message("EthWiFiManager: no Ethernet backend is enabled — Ethernet "\
+                  "will always be disabled. Enable at least one backend by "\
+                  "removing the corresponding ETHWIFI_NO_* flag.")
+#endif
+// ─────────────────────────────────────────────────────────────────────────────
 
 class EthWiFiManager
 {
@@ -36,12 +67,12 @@ public:
     enum class EthernetMode
     {
         Spi,         ///< External SPI module (W5500, DM9051, KSZ8851SNL)
-#if CONFIG_ETH_USE_ESP32_EMAC
+#if ETHWIFI_INTERNAL_EMAC
         InternalEmac ///< Internal RMII EMAC with external PHY — ESP32 classic only
 #endif
     };
 
-#if CONFIG_ETH_USE_ESP32_EMAC
+#if ETHWIFI_INTERNAL_EMAC
     /// PHY chip wired to the internal EMAC via RMII.
     enum class EmacPhyChip
     {
@@ -90,10 +121,10 @@ public:
         bool enabled = true;
 
         // Select Ethernet backend
-#if defined(CONFIG_IDF_TARGET_ESP32) && defined(CONFIG_ETH_USE_ESP32_EMAC)
-        EthernetMode mode = EthernetMode::InternalEmac; ///< Default: internal EMAC on ESP32 classic
+#if ETHWIFI_INTERNAL_EMAC
+        EthernetMode mode = EthernetMode::InternalEmac; ///< Default: internal EMAC when available and not disabled
 #else
-        EthernetMode mode = EthernetMode::Spi;          ///< Default: SPI module on all other targets
+        EthernetMode mode = EthernetMode::Spi;          ///< Default: SPI module
 #endif
 
         // --- SPI module (used when mode == Spi) ---
@@ -108,7 +139,7 @@ public:
         int spiQueueSize = 20;
         int macRxTaskStackSize = 4096;
 
-#if CONFIG_ETH_USE_ESP32_EMAC
+#if ETHWIFI_INTERNAL_EMAC
         // --- Internal EMAC + external PHY via RMII (used when mode == InternalEmac; ESP32 only) ---
         EmacPhyChip emacPhyChip = EmacPhyChip::LAN8720; ///< PHY chip model
         int emacPhyAddr = 1;                             ///< SMI PHY address (1 = typical; -1 = auto-detect)
