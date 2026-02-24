@@ -135,6 +135,7 @@ private:
     bool initCore();
     bool initWiFi();
     bool initEthernet();
+    bool probeW5500();
 
     esp_netif_t *wifiNetif() const;
     void startWiFi();

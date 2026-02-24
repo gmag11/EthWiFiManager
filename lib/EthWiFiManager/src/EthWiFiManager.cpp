@@ -38,7 +38,12 @@ bool EthWiFiManager::begin(const Config &config)
 
     if (m_config.ethernet.enabled)
     {
-        if (!initEthernet())
+        if (!probeW5500())
+        {
+            ESP_LOGW(m_config.logTag, "W5500 not detected - Ethernet disabled, WiFi only");
+            m_config.ethernet.enabled = false;
+        }
+        else if (!initEthernet())
         {
             return false;
         }
@@ -219,6 +224,66 @@ bool EthWiFiManager::initWiFi()
     }
 
     return true;
+}
+
+bool EthWiFiManager::probeW5500()
+{
+    const auto &eth = m_config.ethernet;
+
+    spi_bus_config_t busCfg = {};
+    busCfg.mosi_io_num = eth.mosiPin;
+    busCfg.miso_io_num = eth.misoPin;
+    busCfg.sclk_io_num = eth.sckPin;
+    busCfg.quadwp_io_num = GPIO_NUM_NC;
+    busCfg.quadhd_io_num = GPIO_NUM_NC;
+
+    esp_err_t err = spi_bus_initialize(eth.spiHost, &busCfg, SPI_DMA_CH_AUTO);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+    {
+        ESP_LOGW(m_config.logTag, "W5500 probe: spi_bus_initialize failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    spi_device_interface_config_t devCfg = {};
+    devCfg.clock_speed_hz = eth.spiClockHz;
+    devCfg.mode = 0;
+    devCfg.spics_io_num = eth.csPin;
+    devCfg.queue_size = 1;
+
+    spi_device_handle_t dev;
+    err = spi_bus_add_device(eth.spiHost, &devCfg, &dev);
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(m_config.logTag, "W5500 probe: spi_bus_add_device failed: %s", esp_err_to_name(err));
+        spi_bus_free(eth.spiHost);
+        return false;
+    }
+
+    // W5500 VERSIONR: address 0x0039, common block (BSB=0), read (RWB=0), VDM (OM=0) → control=0x00
+    uint8_t tx[4] = {0x00, 0x39, 0x00, 0x00};
+    uint8_t rx[4] = {};
+
+    spi_transaction_t t = {};
+    t.length = 32; // bits
+    t.tx_buffer = tx;
+    t.rx_buffer = rx;
+
+    spi_device_acquire_bus(dev, portMAX_DELAY);
+    err = spi_device_transmit(dev, &t);
+    spi_device_release_bus(dev);
+
+    spi_bus_remove_device(dev);
+    spi_bus_free(eth.spiHost);
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(m_config.logTag, "W5500 probe: SPI transmit failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    bool found = (rx[3] == 0x04);
+    ESP_LOGI(m_config.logTag, "W5500 probe: VERSIONR=0x%02X -> %s", rx[3], found ? "found" : "not found");
+    return found;
 }
 
 bool EthWiFiManager::initEthernet()
