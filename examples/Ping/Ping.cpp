@@ -100,6 +100,8 @@ void setup()
   config.wifi.autoReconnect = true;
 
   config.ethernet.enabled = true;
+  config.ethernet.mode = EthWiFiManager::EthernetMode::Spi;
+  config.ethernet.spiModule = EthWiFiManager::SpiModule::W5500;
   config.ethernet.spiHost = SPI2_HOST;
   config.ethernet.sckPin = GPIO_NUM_13;
   config.ethernet.misoPin = GPIO_NUM_12;

@@ -87,6 +87,51 @@ Chip support is compiled in via Kconfig / `sdkconfig`:
 
 All three are enabled by default in the Arduino-ESP32 framework.
 
+## Configuring the Internal EMAC (ESP32 classic only)
+
+On the original ESP32 (not S2/S3/C3), the chip includes a built-in RMII Ethernet MAC that can be paired with an external PHY.  
+The library defaults to `EthernetMode::InternalEmac` automatically when building for `CONFIG_IDF_TARGET_ESP32`.
+
+### Selecting the mode explicitly
+
+```cpp
+cfg.ethernet.mode = EthWiFiManager::EthernetMode::InternalEmac; // internal EMAC + PHY
+cfg.ethernet.mode = EthWiFiManager::EthernetMode::Spi;          // SPI module
+```
+
+### Supported PHY chips
+
+| Value | Chip |
+|---|---|
+| `EmacPhyChip::LAN8720` (default) | Microchip LAN8720 / LAN87xx family |
+| `EmacPhyChip::IP101` | IC Plus IP101 |
+| `EmacPhyChip::RTL8201` | Realtek RTL8201 |
+| `EmacPhyChip::DP83848` | TI DP83848 |
+| `EmacPhyChip::KSZ8041` | Microchip KSZ8041 |
+| `EmacPhyChip::KSZ8081` | Microchip KSZ8081 |
+
+### EMAC configuration example
+
+```cpp
+EthWiFiManager::Config cfg;
+
+// Mode is InternalEmac by default on ESP32 classic
+cfg.ethernet.emacPhyChip          = EthWiFiManager::EmacPhyChip::LAN8720;
+cfg.ethernet.emacPhyAddr          = 1;          // SMI address of the PHY (typical: 0 or 1)
+cfg.ethernet.emacMdcPin           = GPIO_NUM_23; // MDC - management data clock
+cfg.ethernet.emacMdioPin          = GPIO_NUM_18; // MDIO - management data I/O
+cfg.ethernet.emacPhyResetPin      = GPIO_NUM_5;  // Active-low PHY reset, or GPIO_NUM_NC
+cfg.ethernet.emacRmiiRefClkPin    = GPIO_NUM_0;  // REF_CLK pin (GPIO0 = external input, typical)
+cfg.ethernet.emacRmiiClockExtInput = true;        // true = PHY drives REF_CLK (most boards)
+```
+
+> **RMII clock**: Most hobbyist modules (e.g. WT32-ETH01, Olimex ESP32-EVB) supply an external 50 MHz crystal to the PHY and route REF_CLK back to GPIO0 (`emacRmiiClockExtInput = true`).  
+> Set `emacRmiiClockExtInput = false` if your board instead expects the ESP32 to output the clock.
+
+> **Kconfig guards**: PHY drivers are gated by `CONFIG_ETH_PHY_IP101`, `CONFIG_ETH_PHY_RTL8201`, `CONFIG_ETH_PHY_LAN87XX`, `CONFIG_ETH_PHY_DP83848`, `CONFIG_ETH_PHY_KSZ80XX`. All are enabled by default in Arduino-ESP32.
+
+> **Compile-time safety**: `EthernetMode::InternalEmac` and the entire `EmacPhyChip` enum only exist when `CONFIG_ETH_USE_ESP32_EMAC` is defined (ESP32 classic). Attempting to use them on other targets (ESP32-S3, C3, etc.) results in a compile error.
+
 ## DHCP and Static IPs
 
 Both interfaces use DHCP by default.

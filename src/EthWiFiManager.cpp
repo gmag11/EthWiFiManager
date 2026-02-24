@@ -38,12 +38,20 @@ bool EthWiFiManager::begin(const Config &config)
 
     if (m_config.ethernet.enabled)
     {
-        if (!probeSpiModule())
+        bool ethernetOk = true;
+#if CONFIG_ETH_USE_ESP32_EMAC
+        if (m_config.ethernet.mode == EthernetMode::Spi)
+#endif
         {
-            ESP_LOGW(m_config.logTag, "SPI Ethernet module not detected - Ethernet disabled, WiFi only");
-            m_config.ethernet.enabled = false;
+            ethernetOk = probeSpiModule();
+            if (!ethernetOk)
+            {
+                ESP_LOGW(m_config.logTag, "SPI Ethernet module not detected - Ethernet disabled, WiFi only");
+                m_config.ethernet.enabled = false;
+            }
         }
-        else if (!initEthernet())
+
+        if (ethernetOk && !initEthernet())
         {
             return false;
         }
@@ -354,112 +362,150 @@ bool EthWiFiManager::initEthernet()
         return false;
     }
 
-    spi_bus_config_t busCfg = {};
-    busCfg.mosi_io_num = m_config.ethernet.mosiPin;
-    busCfg.miso_io_num = m_config.ethernet.misoPin;
-    busCfg.sclk_io_num = m_config.ethernet.sckPin;
-    busCfg.quadwp_io_num = GPIO_NUM_NC;
-    busCfg.quadhd_io_num = GPIO_NUM_NC;
-
-    err = spi_bus_initialize(m_config.ethernet.spiHost, &busCfg, SPI_DMA_CH_AUTO);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
-    {
-        ESP_LOGE(m_config.logTag, "spi_bus_initialize failed: %s", esp_err_to_name(err));
-        return false;
-    }
-
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
-    {
-        ESP_LOGE(m_config.logTag, "gpio_install_isr_service failed: %s", esp_err_to_name(err));
-        return false;
-    }
-
-    m_spiDevCfg = {};
-    m_spiDevCfg.mode = 0;
-    m_spiDevCfg.clock_speed_hz = m_config.ethernet.spiClockHz;
-    m_spiDevCfg.spics_io_num = m_config.ethernet.csPin;
-    m_spiDevCfg.queue_size = m_config.ethernet.spiQueueSize;
-
-    // Each chip uses different SPI frame encoding (command/address phase layout)
-    switch (m_config.ethernet.spiModule)
-    {
-    case SpiModule::DM9051:
-        // DM9051: 1-bit R/W + 7-bit register address
-        m_spiDevCfg.command_bits = 1;
-        m_spiDevCfg.address_bits = 7;
-        break;
-    case SpiModule::KSZ8851SNL:
-        // KSZ8851SNL: full 16-bit header (op[1:0] + BE[3:0] + addr[7:0]<<2) in command phase
-        m_spiDevCfg.command_bits = 16;
-        m_spiDevCfg.address_bits = 0;
-        break;
-    case SpiModule::W5500:
-    default:
-        // W5500: 16-bit address + 8-bit control byte
-        m_spiDevCfg.command_bits = 16;
-        m_spiDevCfg.address_bits = 8;
-        break;
-    }
-
-    err = spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &m_spiHandle);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(m_config.logTag, "spi_bus_add_device failed: %s", esp_err_to_name(err));
-        return false;
-    }
-
-    eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
-    macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
-    eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
-    phyCfg.reset_gpio_num = GPIO_NUM_NC;
-
     esp_eth_mac_t *mac = nullptr;
     esp_eth_phy_t *phy = nullptr;
 
-    switch (m_config.ethernet.spiModule)
+#if CONFIG_ETH_USE_ESP32_EMAC
+    if (m_config.ethernet.mode == EthernetMode::InternalEmac)
     {
-#if CONFIG_ETH_SPI_ETHERNET_DM9051
-    case SpiModule::DM9051:
-    {
-        eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(m_spiHandle);
-        dm9051Cfg.int_gpio_num = m_config.ethernet.intPin;
-        mac = esp_eth_mac_new_dm9051(&dm9051Cfg, &macCfg);
-        phy = esp_eth_phy_new_dm9051(&phyCfg);
+        // ---- Internal RMII EMAC (ESP32 classic) ----
+        // eth_mac_config_t holds MDC/MDIO pins and RMII clock config for ESP32 internal EMAC
+        eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
+        macCfg.smi_mdc_gpio_num   = m_config.ethernet.emacMdcPin;
+        macCfg.smi_mdio_gpio_num  = m_config.ethernet.emacMdioPin;
+        macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
+        macCfg.clock_config.rmii.clock_mode =
+            m_config.ethernet.emacRmiiClockExtInput ? EMAC_CLK_EXT_IN : EMAC_CLK_OUT;
+        macCfg.clock_config.rmii.clock_gpio =
+            (emac_rmii_clock_gpio_t)(int)m_config.ethernet.emacRmiiRefClkPin;
+        mac = esp_eth_mac_new_esp32(&macCfg);
+
+        eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
+        phyCfg.phy_addr       = m_config.ethernet.emacPhyAddr;
+        phyCfg.reset_gpio_num = m_config.ethernet.emacPhyResetPin;
+
+        switch (m_config.ethernet.emacPhyChip)
+        {
+        case EmacPhyChip::IP101:   phy = esp_eth_phy_new_ip101(&phyCfg);   break;
+        case EmacPhyChip::RTL8201: phy = esp_eth_phy_new_rtl8201(&phyCfg); break;
+        case EmacPhyChip::DP83848: phy = esp_eth_phy_new_dp83848(&phyCfg); break;
+        case EmacPhyChip::KSZ8041: phy = esp_eth_phy_new_ksz8041(&phyCfg); break;
+        case EmacPhyChip::KSZ8081: phy = esp_eth_phy_new_ksz8081(&phyCfg); break;
+        case EmacPhyChip::LAN8720:
+        default:                   phy = esp_eth_phy_new_lan87xx(&phyCfg); break;
+        }
+
         if (mac == nullptr || phy == nullptr)
-            ESP_LOGE(m_config.logTag, "DM9051 MAC/PHY init failed");
-        break;
+        {
+            ESP_LOGE(m_config.logTag, "EMAC MAC/PHY init failed");
+            return false;
+        }
     }
+    else
+#endif // CONFIG_ETH_USE_ESP32_EMAC
+    {
+        // ---- SPI Ethernet module ----
+        spi_bus_config_t busCfg = {};
+        busCfg.mosi_io_num = m_config.ethernet.mosiPin;
+        busCfg.miso_io_num = m_config.ethernet.misoPin;
+        busCfg.sclk_io_num = m_config.ethernet.sckPin;
+        busCfg.quadwp_io_num = GPIO_NUM_NC;
+        busCfg.quadhd_io_num = GPIO_NUM_NC;
+
+        err = spi_bus_initialize(m_config.ethernet.spiHost, &busCfg, SPI_DMA_CH_AUTO);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+        {
+            ESP_LOGE(m_config.logTag, "spi_bus_initialize failed: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        err = gpio_install_isr_service(0);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+        {
+            ESP_LOGE(m_config.logTag, "gpio_install_isr_service failed: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        m_spiDevCfg = {};
+        m_spiDevCfg.mode = 0;
+        m_spiDevCfg.clock_speed_hz = m_config.ethernet.spiClockHz;
+        m_spiDevCfg.spics_io_num   = m_config.ethernet.csPin;
+        m_spiDevCfg.queue_size     = m_config.ethernet.spiQueueSize;
+
+        // Each chip uses different SPI frame encoding (command/address phase layout)
+        switch (m_config.ethernet.spiModule)
+        {
+        case SpiModule::DM9051:
+            m_spiDevCfg.command_bits = 1;
+            m_spiDevCfg.address_bits = 7;
+            break;
+        case SpiModule::KSZ8851SNL:
+            m_spiDevCfg.command_bits = 16;
+            m_spiDevCfg.address_bits = 0;
+            break;
+        case SpiModule::W5500:
+        default:
+            m_spiDevCfg.command_bits = 16;
+            m_spiDevCfg.address_bits = 8;
+            break;
+        }
+
+        err = spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &m_spiHandle);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(m_config.logTag, "spi_bus_add_device failed: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
+        macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
+        eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
+        phyCfg.reset_gpio_num = GPIO_NUM_NC;
+
+        switch (m_config.ethernet.spiModule)
+        {
+#if CONFIG_ETH_SPI_ETHERNET_DM9051
+        case SpiModule::DM9051:
+        {
+            eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(m_spiHandle);
+            dm9051Cfg.int_gpio_num = m_config.ethernet.intPin;
+            mac = esp_eth_mac_new_dm9051(&dm9051Cfg, &macCfg);
+            phy = esp_eth_phy_new_dm9051(&phyCfg);
+            if (mac == nullptr || phy == nullptr)
+                ESP_LOGE(m_config.logTag, "DM9051 MAC/PHY init failed");
+            break;
+        }
 #endif
 #if CONFIG_ETH_SPI_ETHERNET_KSZ8851SNL
-    case SpiModule::KSZ8851SNL:
-    {
-        eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(m_spiHandle);
-        kszCfg.int_gpio_num = m_config.ethernet.intPin;
-        mac = esp_eth_mac_new_ksz8851snl(&kszCfg, &macCfg);
-        phy = esp_eth_phy_new_ksz8851snl(&phyCfg);
-        if (mac == nullptr || phy == nullptr)
-            ESP_LOGE(m_config.logTag, "KSZ8851SNL MAC/PHY init failed");
-        break;
-    }
+        case SpiModule::KSZ8851SNL:
+        {
+            eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(m_spiHandle);
+            kszCfg.int_gpio_num = m_config.ethernet.intPin;
+            mac = esp_eth_mac_new_ksz8851snl(&kszCfg, &macCfg);
+            phy = esp_eth_phy_new_ksz8851snl(&phyCfg);
+            if (mac == nullptr || phy == nullptr)
+                ESP_LOGE(m_config.logTag, "KSZ8851SNL MAC/PHY init failed");
+            break;
+        }
 #endif
-    case SpiModule::W5500:
-    default:
-    {
-        eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_spiHandle);
-        w5500Cfg.int_gpio_num = m_config.ethernet.intPin;
-        mac = esp_eth_mac_new_w5500(&w5500Cfg, &macCfg);
-        phy = esp_eth_phy_new_w5500(&phyCfg);
-        if (mac == nullptr || phy == nullptr)
-            ESP_LOGE(m_config.logTag, "W5500 MAC/PHY init failed");
-        break;
-    }
-    }
+        case SpiModule::W5500:
+        default:
+        {
+            eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_spiHandle);
+            w5500Cfg.int_gpio_num = m_config.ethernet.intPin;
+            mac = esp_eth_mac_new_w5500(&w5500Cfg, &macCfg);
+            phy = esp_eth_phy_new_w5500(&phyCfg);
+            if (mac == nullptr || phy == nullptr)
+                ESP_LOGE(m_config.logTag, "W5500 MAC/PHY init failed");
+            break;
+        }
+        }
 
-    if (mac == nullptr || phy == nullptr)
-    {
-        return false;
-    }
+        if (mac == nullptr || phy == nullptr)
+        {
+            return false;
+        }
+    } // end SPI block
 
     esp_eth_config_t ethCfg = ETH_DEFAULT_CONFIG(mac, phy);
     err = esp_eth_driver_install(&ethCfg, &m_ethHandle);
