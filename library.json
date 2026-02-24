@@ -1,0 +1,23 @@
+{
+  "name": "EthWiFiManager",
+  "frameworks": "arduino",
+  "version": "0.1.0",
+  "keywords": ["ethernet", "w5500", "wifi", "esp32", "network"],
+  "platforms": ["espressif32"],
+  "description": "ESP32 library that manages connectivity with a preference for W5500 Ethernet and automatic fallback to WiFi.",
+  "url": "https://github.com/gmag11/EthWiFiManager",
+  "authors": {
+    "name": "German Martin",
+    "email": "github@gmartin.net"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gmag11/EthWiFiManager"
+  },
+  "examples": "examples/*/*.ino",
+  "architectures": "esp32",
+  "export": {
+    "exclude": []
+  },
+  "dependencies": {}
+}

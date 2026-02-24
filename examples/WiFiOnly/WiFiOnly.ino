@@ -1,17 +1,8 @@
 #include <Arduino.h>
 #include <EthWiFiManager.h>
 
-#if __has_include("secrets.h")
-#include "secrets.h"
-#endif
-
-#ifndef WIFI_SSID
 #define WIFI_SSID "SSID"
-#endif
-
-#ifndef WIFI_PASS
 #define WIFI_PASS "PASSWORD"
-#endif
 
 EthWiFiManager network;
 
