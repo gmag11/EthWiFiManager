@@ -38,9 +38,9 @@ bool EthWiFiManager::begin(const Config &config)
 
     if (m_config.ethernet.enabled)
     {
-        if (!probeW5500())
+        if (!probeSpiModule())
         {
-            ESP_LOGW(m_config.logTag, "W5500 not detected - Ethernet disabled, WiFi only");
+            ESP_LOGW(m_config.logTag, "SPI Ethernet module not detected - Ethernet disabled, WiFi only");
             m_config.ethernet.enabled = false;
         }
         else if (!initEthernet())
@@ -226,7 +226,7 @@ bool EthWiFiManager::initWiFi()
     return true;
 }
 
-bool EthWiFiManager::probeW5500()
+bool EthWiFiManager::probeSpiModule()
 {
     const auto &eth = m_config.ethernet;
 
@@ -240,10 +240,11 @@ bool EthWiFiManager::probeW5500()
     esp_err_t err = spi_bus_initialize(eth.spiHost, &busCfg, SPI_DMA_CH_AUTO);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
     {
-        ESP_LOGW(m_config.logTag, "W5500 probe: spi_bus_initialize failed: %s", esp_err_to_name(err));
+        ESP_LOGW(m_config.logTag, "SPI probe: spi_bus_initialize failed: %s", esp_err_to_name(err));
         return false;
     }
 
+    // Probe uses raw bytes (no command/address phase separation) so all chips can be read uniformly
     spi_device_interface_config_t devCfg = {};
     devCfg.clock_speed_hz = eth.spiClockHz;
     devCfg.mode = 0;
@@ -254,35 +255,77 @@ bool EthWiFiManager::probeW5500()
     err = spi_bus_add_device(eth.spiHost, &devCfg, &dev);
     if (err != ESP_OK)
     {
-        ESP_LOGW(m_config.logTag, "W5500 probe: spi_bus_add_device failed: %s", esp_err_to_name(err));
+        ESP_LOGW(m_config.logTag, "SPI probe: spi_bus_add_device failed: %s", esp_err_to_name(err));
         spi_bus_free(eth.spiHost);
         return false;
     }
 
-    // W5500 VERSIONR: address 0x0039, common block (BSB=0), read (RWB=0), VDM (OM=0) → control=0x00
-    uint8_t tx[4] = {0x00, 0x39, 0x00, 0x00};
+    uint8_t tx[4] = {};
     uint8_t rx[4] = {};
+    bool found = false;
 
     spi_transaction_t t = {};
-    t.length = 32; // bits
     t.tx_buffer = tx;
     t.rx_buffer = rx;
 
-    spi_device_acquire_bus(dev, portMAX_DELAY);
-    err = spi_device_transmit(dev, &t);
-    spi_device_release_bus(dev);
+    switch (eth.spiModule)
+    {
+    case SpiModule::DM9051:
+        // Read PIDL register (0x28). DM9051 SPI frame: bit7=R/W, bits[6:0]=addr
+        // Read command: 0x80 | 0x28 = 0xA8. Response: rx[1] = PIDL (expected 0x51)
+        tx[0] = 0xA8;
+        t.length = 16;
+        spi_device_acquire_bus(dev, portMAX_DELAY);
+        err = spi_device_transmit(dev, &t);
+        spi_device_release_bus(dev);
+        if (err == ESP_OK)
+        {
+            found = (rx[1] == 0x51);
+            ESP_LOGI(m_config.logTag, "DM9051 probe: PIDL=0x%02X -> %s", rx[1], found ? "found" : "not found");
+        }
+        break;
 
-    spi_bus_remove_device(dev);
-    spi_bus_free(eth.spiHost);
+    case SpiModule::KSZ8851SNL:
+        // Read CIDER register (0xC0): 16-bit header = SOP(read)=0b10 | BE=0b1111 | addr=0xC0>>2=0x30
+        // Header = 0b10_1111_0011_0000_00 = 0xBCC0
+        // Expected CIDER = 0x8872: rx[2]=0x88, rx[3]=0x72 (or rev variant 0x7x)
+        tx[0] = 0xBC; tx[1] = 0xC0;
+        t.length = 32;
+        spi_device_acquire_bus(dev, portMAX_DELAY);
+        err = spi_device_transmit(dev, &t);
+        spi_device_release_bus(dev);
+        if (err == ESP_OK)
+        {
+            found = (rx[2] == 0x88 && (rx[3] & 0xF0) == 0x70);
+            ESP_LOGI(m_config.logTag, "KSZ8851SNL probe: CIDER=0x%02X%02X -> %s",
+                     rx[2], rx[3], found ? "found" : "not found");
+        }
+        break;
+
+    case SpiModule::W5500:
+    default:
+        // Read VERSIONR: address 0x0039, common block (BSB=0), read (RWB=0), VDM → control=0x00
+        // Expected value: 0x04
+        tx[0] = 0x00; tx[1] = 0x39; tx[2] = 0x00; tx[3] = 0x00;
+        t.length = 32;
+        spi_device_acquire_bus(dev, portMAX_DELAY);
+        err = spi_device_transmit(dev, &t);
+        spi_device_release_bus(dev);
+        if (err == ESP_OK)
+        {
+            found = (rx[3] == 0x04);
+            ESP_LOGI(m_config.logTag, "W5500 probe: VERSIONR=0x%02X -> %s", rx[3], found ? "found" : "not found");
+        }
+        break;
+    }
 
     if (err != ESP_OK)
     {
-        ESP_LOGW(m_config.logTag, "W5500 probe: SPI transmit failed: %s", esp_err_to_name(err));
-        return false;
+        ESP_LOGW(m_config.logTag, "SPI probe: transmit failed: %s", esp_err_to_name(err));
     }
 
-    bool found = (rx[3] == 0x04);
-    ESP_LOGI(m_config.logTag, "W5500 probe: VERSIONR=0x%02X -> %s", rx[3], found ? "found" : "not found");
+    spi_bus_remove_device(dev);
+    spi_bus_free(eth.spiHost);
     return found;
 }
 
@@ -333,12 +376,31 @@ bool EthWiFiManager::initEthernet()
     }
 
     m_spiDevCfg = {};
-    m_spiDevCfg.command_bits = 16;
-    m_spiDevCfg.address_bits = 8;
     m_spiDevCfg.mode = 0;
     m_spiDevCfg.clock_speed_hz = m_config.ethernet.spiClockHz;
     m_spiDevCfg.spics_io_num = m_config.ethernet.csPin;
     m_spiDevCfg.queue_size = m_config.ethernet.spiQueueSize;
+
+    // Each chip uses different SPI frame encoding (command/address phase layout)
+    switch (m_config.ethernet.spiModule)
+    {
+    case SpiModule::DM9051:
+        // DM9051: 1-bit R/W + 7-bit register address
+        m_spiDevCfg.command_bits = 1;
+        m_spiDevCfg.address_bits = 7;
+        break;
+    case SpiModule::KSZ8851SNL:
+        // KSZ8851SNL: full 16-bit header (op[1:0] + BE[3:0] + addr[7:0]<<2) in command phase
+        m_spiDevCfg.command_bits = 16;
+        m_spiDevCfg.address_bits = 0;
+        break;
+    case SpiModule::W5500:
+    default:
+        // W5500: 16-bit address + 8-bit control byte
+        m_spiDevCfg.command_bits = 16;
+        m_spiDevCfg.address_bits = 8;
+        break;
+    }
 
     err = spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &m_spiHandle);
     if (err != ESP_OK)
@@ -347,24 +409,55 @@ bool EthWiFiManager::initEthernet()
         return false;
     }
 
-    m_w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_spiHandle);
-    m_w5500Cfg.int_gpio_num = m_config.ethernet.intPin;
-
     eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
     macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
-    esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&m_w5500Cfg, &macCfg);
-    if (mac == nullptr)
-    {
-        ESP_LOGE(m_config.logTag, "esp_eth_mac_new_w5500 failed");
-        return false;
-    }
-
     eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
     phyCfg.reset_gpio_num = GPIO_NUM_NC;
-    esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phyCfg);
-    if (phy == nullptr)
+
+    esp_eth_mac_t *mac = nullptr;
+    esp_eth_phy_t *phy = nullptr;
+
+    switch (m_config.ethernet.spiModule)
     {
-        ESP_LOGE(m_config.logTag, "esp_eth_phy_new_w5500 failed");
+#if CONFIG_ETH_SPI_ETHERNET_DM9051
+    case SpiModule::DM9051:
+    {
+        eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(m_spiHandle);
+        dm9051Cfg.int_gpio_num = m_config.ethernet.intPin;
+        mac = esp_eth_mac_new_dm9051(&dm9051Cfg, &macCfg);
+        phy = esp_eth_phy_new_dm9051(&phyCfg);
+        if (mac == nullptr || phy == nullptr)
+            ESP_LOGE(m_config.logTag, "DM9051 MAC/PHY init failed");
+        break;
+    }
+#endif
+#if CONFIG_ETH_SPI_ETHERNET_KSZ8851SNL
+    case SpiModule::KSZ8851SNL:
+    {
+        eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(m_spiHandle);
+        kszCfg.int_gpio_num = m_config.ethernet.intPin;
+        mac = esp_eth_mac_new_ksz8851snl(&kszCfg, &macCfg);
+        phy = esp_eth_phy_new_ksz8851snl(&phyCfg);
+        if (mac == nullptr || phy == nullptr)
+            ESP_LOGE(m_config.logTag, "KSZ8851SNL MAC/PHY init failed");
+        break;
+    }
+#endif
+    case SpiModule::W5500:
+    default:
+    {
+        eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_spiHandle);
+        w5500Cfg.int_gpio_num = m_config.ethernet.intPin;
+        mac = esp_eth_mac_new_w5500(&w5500Cfg, &macCfg);
+        phy = esp_eth_phy_new_w5500(&phyCfg);
+        if (mac == nullptr || phy == nullptr)
+            ESP_LOGE(m_config.logTag, "W5500 MAC/PHY init failed");
+        break;
+    }
+    }
+
+    if (mac == nullptr || phy == nullptr)
+    {
         return false;
     }
 

@@ -25,6 +25,13 @@ public:
         Ethernet,
     };
 
+    enum class SpiModule
+    {
+        W5500,
+        DM9051,
+        KSZ8851SNL,
+    };
+
     struct WiFiConfig
     {
         const char *ssid = nullptr;
@@ -59,6 +66,7 @@ public:
     struct EthernetConfig
     {
         bool enabled = true;
+        SpiModule spiModule = SpiModule::W5500;
         spi_host_device_t spiHost = SPI2_HOST;
         gpio_num_t sckPin = GPIO_NUM_13;
         gpio_num_t misoPin = GPIO_NUM_12;
@@ -127,7 +135,6 @@ private:
     spi_device_handle_t m_spiHandle = nullptr;
 
     spi_device_interface_config_t m_spiDevCfg = {};
-    eth_w5500_config_t m_w5500Cfg = {};
 
     volatile bool m_ethHasIp = false;
     volatile bool m_ethLinkUp = false;
@@ -135,7 +142,7 @@ private:
     bool initCore();
     bool initWiFi();
     bool initEthernet();
-    bool probeW5500();
+    bool probeSpiModule();
 
     esp_netif_t *wifiNetif() const;
     void startWiFi();

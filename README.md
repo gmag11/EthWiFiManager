@@ -1,6 +1,6 @@
 # EthWiFiManager
 
-ESP32 library that manages connectivity with a preference for W5500 Ethernet and automatic fallback to WiFi.
+ESP32 library that manages connectivity with a preference for SPI Ethernet (W5500, DM9051, or KSZ8851SNL) and automatic fallback to WiFi.
 
 ## Features
 
@@ -50,6 +50,42 @@ ESP-IDF supports two main categories of Ethernet interfaces; this library uses t
   - Generic IEEE-802.3 PHY (`esp_eth_phy_new_generic`) for chips without a specific driver
 
   Note: the internal EMAC + PHY flow applies to chips with a built-in EMAC (original ESP32 family using RMII). When using RMII you must pay attention to RMII clock source (REF_CLK) and pin assignments.
+
+## Configuring the SPI Ethernet Module
+
+The library supports all three SPI Ethernet modules available in ESP-IDF.  
+Set `cfg.ethernet.spiModule` to select the chip; the default is `W5500`.
+
+| Value | Chip | SPI framing |
+|---|---|---|
+| `SpiModule::W5500` (default) | WIZnet W5500 | `command_bits=16`, `address_bits=8` |
+| `SpiModule::DM9051` | DAVICOM DM9051 | `command_bits=1`, `address_bits=7` |
+| `SpiModule::KSZ8851SNL` | Microchip KSZ8851SNL | `command_bits=16`, `address_bits=0` |
+
+```cpp
+EthWiFiManager::Config cfg;
+
+// Select Ethernet chip (default is W5500)
+cfg.ethernet.spiModule = EthWiFiManager::SpiModule::DM9051;
+
+// SPI pins
+cfg.ethernet.spiHost  = SPI2_HOST;
+cfg.ethernet.mosiPin  = GPIO_NUM_11;
+cfg.ethernet.misoPin  = GPIO_NUM_12;
+cfg.ethernet.sckPin   = GPIO_NUM_13;
+cfg.ethernet.csPin    = GPIO_NUM_14;
+cfg.ethernet.intPin   = GPIO_NUM_10; // INT pin is mandatory — must be physically wired
+```
+
+> **Note**: The ESP-IDF driver for all three SPI Ethernet chips requires a physical interrupt GPIO.  
+> `GPIO_NUM_NC` is rejected at init time; always wire the INT pin.
+
+Chip support is compiled in via Kconfig / `sdkconfig`:
+- `CONFIG_ETH_SPI_ETHERNET_W5500`
+- `CONFIG_ETH_SPI_ETHERNET_DM9051`
+- `CONFIG_ETH_SPI_ETHERNET_KSZ8851SNL`
+
+All three are enabled by default in the Arduino-ESP32 framework.
 
 ## DHCP and Static IPs
 
