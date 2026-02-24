@@ -17,7 +17,7 @@
   "examples": "examples/*/*.ino",
   "architectures": "esp32",
   "export": {
-    "exclude": []
+    "exclude": [".vscode"]
   },
   "dependencies": {}
 }
