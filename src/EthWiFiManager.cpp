@@ -63,6 +63,55 @@ bool EthWiFiManager::begin(const Config &config)
     return true;
 }
 
+bool EthWiFiManager::beginApRouter(const ApRouterConfig &config)
+{
+    if (m_started)
+    {
+        return true;
+    }
+
+    m_apRouterConfig = config;
+    m_config.logTag = (config.logTag != nullptr) ? config.logTag : "EthWiFiManager";
+    m_config.ethernet = config.ethernet;
+    s_instance = this;
+    m_apRouterMode = true;
+
+    if (!initCore())
+    {
+        return false;
+    }
+
+    if (m_config.ethernet.enabled)
+    {
+        bool ethernetOk = true;
+#if ETHWIFI_INTERNAL_EMAC
+        if (m_config.ethernet.mode == EthernetMode::Spi)
+#endif
+        {
+            ethernetOk = probeSpiModule();
+            if (!ethernetOk)
+            {
+                ESP_LOGW(m_config.logTag, "SPI Ethernet module not detected - Ethernet disabled");
+                m_config.ethernet.enabled = false;
+            }
+        }
+
+        if (ethernetOk && !initEthernet())
+        {
+            return false;
+        }
+    }
+
+    if (!initApRouter())
+    {
+        return false;
+    }
+
+    ESP_LOGI(m_config.logTag, "AP Router started (ethernet=%s)", m_config.ethernet.enabled ? "enabled" : "disabled");
+    m_started = true;
+    return true;
+}
+
 wl_status_t EthWiFiManager::status() const
 {
     if (m_ethHasIp)
@@ -230,6 +279,50 @@ bool EthWiFiManager::initWiFi()
 
         m_eventsRegistered = true;
     }
+
+    return true;
+}
+
+bool EthWiFiManager::initApRouter()
+{
+    const auto &cfg = m_apRouterConfig;
+
+    // Configure AP IP addressing and DHCP server range before starting the AP.
+    // softAPConfig stops/restarts the DHCP server with the new address range.
+    if (!WiFi.softAPConfig(cfg.apLocalIP, cfg.apGateway, cfg.apSubnet))
+    {
+        ESP_LOGE(m_config.logTag, "[AP] softAPConfig failed");
+        return false;
+    }
+
+    // Start the WiFi AP (initialises the WiFi driver, sets AP mode, applies config).
+    const bool hasPassword = (cfg.apPassword != nullptr && strlen(cfg.apPassword) >= 8);
+    const bool started = WiFi.softAP(
+        cfg.apSsid,
+        hasPassword ? cfg.apPassword : nullptr,
+        cfg.apChannel,
+        0,                      // ssid_hidden = 0 (broadcast)
+        cfg.apMaxConnections);
+
+    if (!started)
+    {
+        ESP_LOGE(m_config.logTag, "[AP] WiFi.softAP failed");
+        return false;
+    }
+
+    esp_ip4_addr_t apIp = toEspIp4(cfg.apLocalIP);
+    ESP_LOGI(m_config.logTag, "[AP] Started: SSID=%s IP=" IPSTR " auth=%s",
+             cfg.apSsid, IP2STR(&apIp), hasPassword ? "WPA2-PSK" : "open");
+
+#if defined(CONFIG_LWIP_IP_NAPT) && CONFIG_LWIP_IP_NAPT
+    // Enable NAPT on the AP interface so clients reach the internet via Ethernet.
+    ip_napt_enable(apIp.addr, 1);
+    ESP_LOGI(m_config.logTag, "[AP] NAPT enabled — AP clients routed via Ethernet IP");
+#else
+    ESP_LOGW(m_config.logTag,
+             "[AP] NAPT not available — add CONFIG_LWIP_IP_FORWARD=y and "
+             "CONFIG_LWIP_IP_NAPT=y to sdkconfig (or board_build.cmake_extra_args)");
+#endif
 
     return true;
 }
@@ -675,7 +768,10 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
 
                     m_ethHasIp = true;
                     ESP_LOGI(m_config.logTag, "[ETH] Static IP applied");
-                    stopWiFi();
+                    if (!m_apRouterMode)
+                    {
+                        stopWiFi();
+                    }
                 }
             }
         }
@@ -685,8 +781,11 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
         m_ethLinkUp = false;
         m_ethHasIp = false;
         ESP_LOGW(m_config.logTag, "[ETH] Link DOWN");
-        ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
-        startWiFi();
+        if (!m_apRouterMode)
+        {
+            ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
+            startWiFi();
+        }
         break;
 
     case ETHERNET_EVENT_START:
@@ -706,7 +805,10 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
         ESP_LOGI(m_config.logTag, "[ETH] IP=" IPSTR " GW=" IPSTR " MASK=" IPSTR " route=Ethernet",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
         m_ethHasIp = true;
-        stopWiFi();
+        if (!m_apRouterMode)
+        {
+            stopWiFi();
+        }
         return;
     }
 

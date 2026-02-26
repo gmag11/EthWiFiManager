@@ -16,6 +16,10 @@
 #include <driver/spi_master.h>
 #include <sdkconfig.h>
 
+#if defined(CONFIG_LWIP_IP_NAPT) && CONFIG_LWIP_IP_NAPT
+#include <lwip/ip4_napt.h>
+#endif
+
 // ── EthWiFiManager per-module feature flags ───────────────────────────────────
 // Each Ethernet backend is enabled by default when the underlying ESP-IDF
 // Kconfig supports it. Opt out of individual backends to save flash by passing
@@ -183,7 +187,29 @@ public:
         EthernetConfig ethernet = {};
     };
 
+    /// Configuration for AP-Router mode: Ethernet upstream + WiFi AP with NAT.
+    /// Requires CONFIG_LWIP_IP_FORWARD=y and CONFIG_LWIP_IP_NAPT=y in sdkconfig.
+    struct ApRouterConfig
+    {
+        const char *logTag = "EthWiFiManager";
+        EthernetConfig ethernet = {};
+
+        // WiFi AP settings
+        const char *apSsid = "ESP32-Router";
+        const char *apPassword = nullptr; ///< nullptr or <8 chars = open; >=8 chars = WPA2-PSK
+        uint8_t apChannel = 1;
+        uint8_t apMaxConnections = 4;
+
+        // AP subnet — must differ from the Ethernet subnet
+        IPAddress apLocalIP = IPAddress(192, 168, 4, 1);
+        IPAddress apGateway = IPAddress(192, 168, 4, 1);
+        IPAddress apSubnet  = IPAddress(255, 255, 255, 0);
+    };
+
     bool begin(const Config &config);
+
+    /// Start in AP-Router mode: WiFi AP shares the Ethernet connection via NAT.
+    bool beginApRouter(const ApRouterConfig &config);
 
     wl_status_t status() const;
     IPAddress localIP() const;
@@ -202,6 +228,8 @@ private:
     Config m_config = {};
     bool m_started = false;
     bool m_eventsRegistered = false;
+    bool m_apRouterMode = false;
+    ApRouterConfig m_apRouterConfig = {};
 
     esp_netif_t *m_ethNetif = nullptr;
     esp_eth_handle_t m_ethHandle = nullptr;
@@ -216,6 +244,7 @@ private:
     bool initCore();
     bool initWiFi();
     bool initEthernet();
+    bool initApRouter();
     bool probeSpiModule();
 
     esp_netif_t *wifiNetif() const;

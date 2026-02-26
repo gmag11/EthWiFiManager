@@ -5,11 +5,13 @@ ESP32 library that manages connectivity with a preference for SPI Ethernet (W550
 ## Features
 
 - Combined mode: Ethernet preferred with WiFi fallback.
+- **AP-Router mode**: WiFi access point that shares an Ethernet connection via NAT — turn the ESP32 into a router.
 - WiFi-only mode (disable Ethernet via configuration).
 - DHCP by default on both WiFi and Ethernet.
 - Optional static IP for WiFi and Ethernet via a `config(...)` style API.
 - Simple API similar to the basic `WiFi` usage:
   - `begin()`
+  - `beginApRouter()`
   - `status()`
   - `localIP()`
   - `gatewayIP()`
@@ -29,6 +31,7 @@ Included examples:
 - `WiFiStatic` (WiFi with static IP)
 - `EthernetStaticFallbackWiFi` (static Ethernet + WiFi fallback)
 - `BothStatic` (static WiFi and Ethernet)
+- `EthApRouter` (AP-Router: WiFi AP sharing Ethernet via NAT)
 
 ## Supported Ethernet Hardware
 
@@ -151,3 +154,71 @@ cfg.ethernet.config(IPAddress(192,168,5,60), IPAddress(192,168,5,1), IPAddress(2
 cfg.wifi.useDHCP();
 cfg.ethernet.useDHCP();
 ```
+
+## AP-Router Mode
+
+In AP-Router mode the ESP32 works like a router:
+
+```
+Internet ──► Ethernet (upstream) ──► ESP32 (NAT) ──► WiFi AP ──► client devices
+```
+
+- The ESP32's WiFi interface runs as an **Access Point** with a built-in DHCP server.
+- Client devices connect to the ESP32's AP and receive an IP address automatically.
+- All client traffic is forwarded to the Ethernet interface via **NAT**, so it appears
+  to the upstream network as if it came from the ESP32's Ethernet IP.
+- The AP subnet (default `192.168.4.0/24`) must differ from the Ethernet subnet.
+
+### Enabling NAPT in the ESP-IDF / Arduino build
+
+NAPT requires two lwIP Kconfig options:
+
+| Option | Value |
+|---|---|
+| `CONFIG_LWIP_IP_FORWARD` | `y` |
+| `CONFIG_LWIP_IP_NAPT` | `y` |
+
+For PlatformIO, add to `platformio.ini`:
+
+```ini
+board_build.cmake_extra_args =
+    -DCONFIG_LWIP_IP_FORWARD=y
+    -DCONFIG_LWIP_IP_NAPT=y
+```
+
+### Example
+
+```cpp
+#include <EthWiFiManager.h>
+
+EthWiFiManager network;
+
+void setup() {
+    EthWiFiManager::ApRouterConfig config;
+
+    // Ethernet upstream (DHCP by default)
+    config.ethernet.enabled = true;
+    config.ethernet.spiHost  = SPI2_HOST;
+    config.ethernet.sckPin   = GPIO_NUM_13;
+    config.ethernet.misoPin  = GPIO_NUM_12;
+    config.ethernet.mosiPin  = GPIO_NUM_11;
+    config.ethernet.csPin    = GPIO_NUM_14;
+    config.ethernet.intPin   = GPIO_NUM_10;
+
+    // WiFi AP
+    config.apSsid           = "ESP32-Router";
+    config.apPassword       = "mypassword";   // >=8 chars = WPA2-PSK; nullptr = open
+    config.apMaxConnections = 4;
+
+    // AP addressing — must differ from Ethernet subnet
+    config.apLocalIP = IPAddress(192, 168, 4, 1);
+    config.apGateway = IPAddress(192, 168, 4, 1);
+    config.apSubnet  = IPAddress(255, 255, 255, 0);
+
+    network.beginApRouter(config);
+}
+```
+
+When the library logs `[AP] NAPT enabled`, AP clients can reach the internet through
+the Ethernet connection.  If NAPT is not available the library logs a warning with the
+sdkconfig options that need to be enabled.
