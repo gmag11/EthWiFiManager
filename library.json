@@ -16,9 +16,6 @@
   },
   "examples": "examples/*/*.cpp",
   "architectures": "esp32",
-  "build": {
-    "srcFilter": "+<src/>"
-  },
   "export": {
     "exclude": [".vscode", "examples/"]
   },
