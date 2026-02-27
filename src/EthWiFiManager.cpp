@@ -673,16 +673,34 @@ bool EthWiFiManager::initEthernet()
     if (m_config.ethernet.mode == EthernetMode::InternalEmac)
     {
         // ---- Internal RMII EMAC (ESP32 classic) ----
-        // eth_mac_config_t holds MDC/MDIO pins and RMII clock config for ESP32 internal EMAC
         eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
+        macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        // IDF 5.x: EMAC-specific config moved to eth_esp32_emac_config_t
+        eth_esp32_emac_config_t emacCfg = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+        // smi_mdc/mdio_gpio_num are deprecated in IDF 5.4+ (replaced by smi_gpio struct)
+        // but remain functional; suppress the warning for portability across IDF 5.x.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        emacCfg.smi_mdc_gpio_num  = m_config.ethernet.emacMdcPin;
+        emacCfg.smi_mdio_gpio_num = m_config.ethernet.emacMdioPin;
+#pragma GCC diagnostic pop
+        emacCfg.clock_config.rmii.clock_mode =
+            m_config.ethernet.emacRmiiClockExtInput ? EMAC_CLK_EXT_IN : EMAC_CLK_OUT;
+        emacCfg.clock_config.rmii.clock_gpio =
+            (emac_rmii_clock_gpio_t)(int)m_config.ethernet.emacRmiiRefClkPin;
+        mac = esp_eth_mac_new_esp32(&emacCfg, &macCfg);
+#else
+        // IDF 4.x: EMAC config is directly in eth_mac_config_t
         macCfg.smi_mdc_gpio_num   = m_config.ethernet.emacMdcPin;
         macCfg.smi_mdio_gpio_num  = m_config.ethernet.emacMdioPin;
-        macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
         macCfg.clock_config.rmii.clock_mode =
             m_config.ethernet.emacRmiiClockExtInput ? EMAC_CLK_EXT_IN : EMAC_CLK_OUT;
         macCfg.clock_config.rmii.clock_gpio =
             (emac_rmii_clock_gpio_t)(int)m_config.ethernet.emacRmiiRefClkPin;
         mac = esp_eth_mac_new_esp32(&macCfg);
+#endif // ESP_IDF_VERSION
 
         eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
         phyCfg.phy_addr       = m_config.ethernet.emacPhyAddr;
@@ -693,8 +711,13 @@ bool EthWiFiManager::initEthernet()
         case EmacPhyChip::IP101:   phy = esp_eth_phy_new_ip101(&phyCfg);   break;
         case EmacPhyChip::RTL8201: phy = esp_eth_phy_new_rtl8201(&phyCfg); break;
         case EmacPhyChip::DP83848: phy = esp_eth_phy_new_dp83848(&phyCfg); break;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        case EmacPhyChip::KSZ8041:
+        case EmacPhyChip::KSZ8081: phy = esp_eth_phy_new_ksz80xx(&phyCfg); break;
+#else
         case EmacPhyChip::KSZ8041: phy = esp_eth_phy_new_ksz8041(&phyCfg); break;
         case EmacPhyChip::KSZ8081: phy = esp_eth_phy_new_ksz8081(&phyCfg); break;
+#endif
         case EmacPhyChip::LAN8720:
         default:                   phy = esp_eth_phy_new_lan87xx(&phyCfg); break;
         }
