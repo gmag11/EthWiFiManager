@@ -151,6 +151,19 @@ public:
         }
     };
 
+    /// Configuration for the soft-AP (independent of AP-Router mode).
+    struct ApConfig
+    {
+        const char *ssid           = "ESP32-AP";   ///< AP network name
+        const char *password       = nullptr;       ///< nullptr or <8 chars → open; ≥8 chars → WPA2-PSK
+        uint8_t     channel        = 1;             ///< 802.11 channel (ignored when STA is connected; the STA channel is used instead)
+        wifi_bandwidth_t bandwidth = WIFI_BW_HT20;  ///< Channel bandwidth: WIFI_BW_HT20 or WIFI_BW_HT40
+        uint8_t     maxConnections = 4;             ///< Maximum simultaneous AP clients
+        IPAddress   localIP        = IPAddress(192, 168, 4, 1);
+        IPAddress   gateway        = IPAddress(192, 168, 4, 1);
+        IPAddress   subnet         = IPAddress(255, 255, 255, 0);
+    };
+
     struct EthernetConfig
     {
         bool enabled = true;
@@ -261,12 +274,42 @@ public:
 
     bool ethernetLinkUp() const;
     bool ethernetHasIP() const;
+    bool isEthernetEnabled() const; ///< true when the Ethernet driver is installed and running
+    bool isWiFiEnabled() const;     ///< true unless disableWiFi() has been called
     ActiveInterface activeInterface() const;
     const char *activeInterfaceName() const;
 
     /// Register a callback invoked on network state changes.
     /// May be called before or after begin(). Replaces any previously registered callback.
     void onEvent(EventCallback cb);
+
+    // ── Dynamic control ───────────────────────────────────────────────────────
+    /// Enable Ethernet. If the driver is already installed (begin() was called with
+    /// ethernet.enabled=true) it is simply (re)started. If not, the SPI module is
+    /// probed and the driver is installed from scratch.
+    bool enableEthernet();
+
+    /// Stop the Ethernet driver. Triggers EthLinkDown + InterfaceChanged events
+    /// and activates the WiFi fallback if WiFi is enabled.
+    bool disableEthernet();
+
+    /// Reconfigure and (re)connect the WiFi STA interface.
+    /// Replaces the WiFi credentials / IP config and starts the connection.
+    bool enableWiFi(const WiFiConfig &cfg);
+
+    /// Disconnect and disable the WiFi STA interface.
+    /// Auto-reconnect is suppressed until enableWiFi() is called again.
+    bool disableWiFi();
+
+    /// Start (or reconfigure) the soft-AP.
+    /// If the STA is already connected the AP channel is forced to match the STA channel.
+    bool enableAP(const ApConfig &cfg);
+
+    /// Stop the soft-AP and disconnect all associated clients.
+    bool disableAP();
+
+    /// Returns true when the soft-AP is currently active.
+    bool isAPActive() const;
 
 private:
     static EthWiFiManager *s_instance;
@@ -296,6 +339,10 @@ private:
 
     volatile bool m_ethHasIp = false;
     volatile bool m_ethLinkUp = false;
+
+    bool m_wifiEnabled = true;   ///< false after disableWiFi(); suppresses auto-reconnect
+    bool m_apActive    = false;  ///< true when soft-AP is running
+    ApConfig m_apConfig = {};
 
     EventCallback m_eventCallback;
     void fireEvent(Event event, IPAddress ip = IPAddress((uint32_t)0));

@@ -219,6 +219,16 @@ bool EthWiFiManager::ethernetHasIP() const
     return m_ethHasIp;
 }
 
+bool EthWiFiManager::isEthernetEnabled() const
+{
+    return m_ethHandle != nullptr;
+}
+
+bool EthWiFiManager::isWiFiEnabled() const
+{
+    return m_wifiEnabled;
+}
+
 EthWiFiManager::ActiveInterface EthWiFiManager::activeInterface() const
 {
     if (m_ethHasIp)
@@ -245,6 +255,182 @@ const char *EthWiFiManager::activeInterfaceName() const
     default:
         return "None";
     }
+}
+
+// ── Dynamic control ──────────────────────────────────────────────────────────────────
+
+bool EthWiFiManager::enableEthernet()
+{
+    if (!m_started)
+    {
+        ESP_LOGW(m_config.logTag, "enableEthernet: call begin() first");
+        return false;
+    }
+
+    if (m_ethHandle != nullptr)
+    {
+        // Driver already installed — just (re)start it.
+        esp_err_t err = esp_eth_start(m_ethHandle);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(m_config.logTag, "enableEthernet: esp_eth_start failed: %s", esp_err_to_name(err));
+            return false;
+        }
+        ESP_LOGI(m_config.logTag, "[ETH] Re-enabled (driver restarted)");
+        return true;
+    }
+
+    // Driver not yet installed: probe + full init.
+    m_config.ethernet.enabled = true;
+    bool ethernetOk = true;
+#if ETHWIFI_INTERNAL_EMAC
+    if (m_config.ethernet.mode == EthernetMode::Spi)
+#endif
+    {
+        ethernetOk = probeSpiModule();
+        if (!ethernetOk)
+        {
+            ESP_LOGW(m_config.logTag, "enableEthernet: SPI module not detected");
+            m_config.ethernet.enabled = false;
+            fireEvent(Event::EthernetDisabled);
+            return false;
+        }
+    }
+    return initEthernet();
+}
+
+bool EthWiFiManager::disableEthernet()
+{
+    if (!m_started || m_ethHandle == nullptr)
+    {
+        ESP_LOGW(m_config.logTag, "disableEthernet: Ethernet not running");
+        return false;
+    }
+
+    esp_err_t err = esp_eth_stop(m_ethHandle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(m_config.logTag, "disableEthernet: esp_eth_stop failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    const bool hadIp = m_ethHasIp;
+    m_ethLinkUp = false;
+    m_ethHasIp  = false;
+    ESP_LOGI(m_config.logTag, "[ETH] Disabled by user");
+    fireEvent(Event::EthLinkDown);
+    if (hadIp)
+    {
+        fireEvent(Event::InterfaceChanged);
+    }
+
+    if (m_wifiEnabled)
+    {
+        startWiFi();
+    }
+    return true;
+}
+
+bool EthWiFiManager::enableWiFi(const WiFiConfig &cfg)
+{
+    if (!m_started)
+    {
+        ESP_LOGW(m_config.logTag, "enableWiFi: call begin() first");
+        return false;
+    }
+
+    m_config.wifi  = cfg;
+    m_wifiEnabled  = true;
+    WiFi.setAutoReconnect(cfg.autoReconnect);
+    startWiFi();
+    ESP_LOGI(m_config.logTag, "[WiFi] STA enabled: ssid=%s", cfg.ssid != nullptr ? cfg.ssid : "<null>");
+    return true;
+}
+
+bool EthWiFiManager::disableWiFi()
+{
+    if (!m_started)
+    {
+        ESP_LOGW(m_config.logTag, "disableWiFi: call begin() first");
+        return false;
+    }
+
+    m_wifiEnabled = false;
+    stopWiFi();
+    ESP_LOGI(m_config.logTag, "[WiFi] STA disabled by user");
+    return true;
+}
+
+bool EthWiFiManager::enableAP(const ApConfig &cfg)
+{
+    if (!m_started)
+    {
+        ESP_LOGW(m_config.logTag, "enableAP: call begin() first");
+        return false;
+    }
+
+    m_apConfig = cfg;
+
+    // If STA is connected use its channel to avoid dual-channel conflicts.
+    uint8_t channel = cfg.channel;
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        channel = static_cast<uint8_t>(WiFi.channel());
+        if (channel != cfg.channel)
+        {
+            ESP_LOGI(m_config.logTag, "[AP] STA active — forcing AP channel %u (ignoring requested %u)",
+                     channel, cfg.channel);
+        }
+    }
+
+    if (!WiFi.softAPConfig(cfg.localIP, cfg.gateway, cfg.subnet))
+    {
+        ESP_LOGE(m_config.logTag, "[AP] softAPConfig failed");
+        return false;
+    }
+
+    // Apply bandwidth before starting AP.
+    esp_wifi_set_bandwidth(WIFI_IF_AP, cfg.bandwidth);
+
+    const bool hasPwd = (cfg.password != nullptr && strlen(cfg.password) >= 8);
+    const bool ok = WiFi.softAP(
+        cfg.ssid,
+        hasPwd ? cfg.password : nullptr,
+        channel,
+        0,
+        cfg.maxConnections);
+
+    if (!ok)
+    {
+        ESP_LOGE(m_config.logTag, "[AP] WiFi.softAP failed");
+        return false;
+    }
+
+    m_apActive = true;
+    ESP_LOGI(m_config.logTag, "[AP] Started: SSID=%s ch=%u bw=%s auth=%s IP=%s",
+             cfg.ssid, channel,
+             cfg.bandwidth == WIFI_BW_HT40 ? "HT40" : "HT20",
+             hasPwd ? "WPA2-PSK" : "open",
+             cfg.localIP.toString().c_str());
+    return true;
+}
+
+bool EthWiFiManager::disableAP()
+{
+    if (!m_apActive)
+    {
+        return true; // nothing to do
+    }
+
+    WiFi.softAPdisconnect(true); // true = also disable the AP interface
+    m_apActive = false;
+    ESP_LOGI(m_config.logTag, "[AP] Stopped by user");
+    return true;
+}
+
+bool EthWiFiManager::isAPActive() const
+{
+    return m_apActive;
 }
 
 bool EthWiFiManager::initCore()
@@ -1111,6 +1297,12 @@ void EthWiFiManager::onWiFiEvent(int32_t eventId)
     }
 
     fireEvent(Event::WiFiDisconnected);
+
+    if (!m_wifiEnabled)
+    {
+        ESP_LOGD(m_config.logTag, "[WiFi] Disconnected (WiFi disabled by user, no reconnect)");
+        return;
+    }
 
     if (!m_ethHasIp)
     {
