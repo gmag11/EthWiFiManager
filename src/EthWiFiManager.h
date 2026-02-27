@@ -16,15 +16,21 @@
 #include <driver/spi_master.h>
 #include <sdkconfig.h>
 
+// ── AP-Router feature flag ─────────────────────────────────────────────────────
+// AP-Router mode (WiFi AP + Ethernet NAT + built-in DNS forwarder) is compiled
+// out by default to keep the binary small for non-router builds.
+// Enable by adding  -DETHWIFI_AP_ROUTER  to build_flags in platformio.ini.
+// ─────────────────────────────────────────────────────────────────────────────
+#if defined(ETHWIFI_AP_ROUTER)
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <lwip/sockets.h>
 #include <fcntl.h>
-
 #if defined(CONFIG_LWIP_IPV4_NAPT) && CONFIG_LWIP_IPV4_NAPT
 #include <lwip/lwip_napt.h>
 #include <lwip/tcpip.h>
 #endif
+#endif // ETHWIFI_AP_ROUTER
 
 // ── EthWiFiManager per-module feature flags ───────────────────────────────────
 // Each Ethernet backend is enabled by default when the underlying ESP-IDF
@@ -193,8 +199,10 @@ public:
         EthernetConfig ethernet = {};
     };
 
+#if defined(ETHWIFI_AP_ROUTER)
     /// Configuration for AP-Router mode: Ethernet upstream + WiFi AP with NAT.
     /// Requires CONFIG_LWIP_IP_FORWARD=y and CONFIG_LWIP_IPV4_NAPT=y in sdkconfig.
+    /// Also requires -DETHWIFI_AP_ROUTER in build_flags.
     struct ApRouterConfig
     {
         const char *logTag = "EthWiFiManager";
@@ -211,16 +219,20 @@ public:
         IPAddress apGateway = IPAddress(192, 168, 4, 1);
         IPAddress apSubnet  = IPAddress(255, 255, 255, 0);
 
-        /// DNS server advertised to AP clients via DHCP Option 6.
-        /// Used immediately at startup; overridden with the Ethernet-learned DNS
-        /// once Ethernet has an IP. Set to IPAddress(0,0,0,0) to disable.
+        /// Initial upstream DNS used by the built-in DNS forwarder before Ethernet
+        /// obtains its own DNS from DHCP. Overridden automatically once Ethernet
+        /// has an IP. Set to IPAddress(0,0,0,0) to leave unset until Ethernet is up.
         IPAddress apFallbackDns = IPAddress(8, 8, 8, 8);
     };
+#endif // ETHWIFI_AP_ROUTER
 
     bool begin(const Config &config);
 
+#if defined(ETHWIFI_AP_ROUTER)
     /// Start in AP-Router mode: WiFi AP shares the Ethernet connection via NAT.
+    /// Compile with -DETHWIFI_AP_ROUTER to enable this mode.
     bool beginApRouter(const ApRouterConfig &config);
+#endif // ETHWIFI_AP_ROUTER
 
     wl_status_t status() const;
     IPAddress localIP() const;
@@ -239,41 +251,46 @@ private:
     Config m_config = {};
     bool m_started = false;
     bool m_eventsRegistered = false;
-    bool m_apRouterMode = false;
-    ApRouterConfig m_apRouterConfig = {};
 
     esp_netif_t *m_ethNetif = nullptr;
     esp_eth_handle_t m_ethHandle = nullptr;
     esp_eth_netif_glue_handle_t m_ethGlue = nullptr;
+
+#if defined(ETHWIFI_AP_ROUTER)
+    bool m_apRouterMode = false;
+    ApRouterConfig m_apRouterConfig = {};
     esp_netif_t *m_apNetif = nullptr;
+
+    // DNS proxy
+    static constexpr uint16_t DNS_PROXY_PORT    = 53;
+    static constexpr int      DNS_PROXY_PENDING = 8;    ///< max concurrent queries
+    static constexpr uint32_t DNS_PROXY_TIMEOUT = 3000; ///< ms per upstream query
+    TaskHandle_t              m_dnsProxyTask    = nullptr;
+    volatile uint32_t         m_upstreamDns     = 0;   ///< upstream DNS in network byte order
+#endif // ETHWIFI_AP_ROUTER
 
     spi_device_interface_config_t m_spiDevCfg = {};
 
     volatile bool m_ethHasIp = false;
     volatile bool m_ethLinkUp = false;
 
-    // DNS proxy
-    static constexpr uint16_t DNS_PROXY_PORT    = 53;
-    static constexpr int      DNS_PROXY_PENDING = 8;   ///< max concurrent queries
-    static constexpr uint32_t DNS_PROXY_TIMEOUT = 3000; ///< ms per upstream query
-    TaskHandle_t              m_dnsProxyTask    = nullptr;
-    volatile uint32_t         m_upstreamDns     = 0;  ///< network byte order
-
     bool initCore();
     bool initWiFi();
     bool initEthernet();
-    bool initApRouter();
     bool probeSpiModule();
 
     esp_netif_t *wifiNetif() const;
     void startWiFi();
     void stopWiFi();
-    void setApDhcpDns(uint32_t dnsAddr);
+
+#if defined(ETHWIFI_AP_ROUTER)
+    bool initApRouter();
     void updateApDns();
     void startDnsProxy();
     void stopDnsProxy();
     void dnsProxyLoop();
     static void dnsProxyTaskThunk(void *arg);
+#endif // ETHWIFI_AP_ROUTER
 
     void onEthEvent(int32_t eventId);
     void onIpEvent(int32_t eventId, void *eventData);

@@ -63,6 +63,7 @@ bool EthWiFiManager::begin(const Config &config)
     return true;
 }
 
+#if defined(ETHWIFI_AP_ROUTER)
 bool EthWiFiManager::beginApRouter(const ApRouterConfig &config)
 {
     if (m_started)
@@ -111,6 +112,7 @@ bool EthWiFiManager::beginApRouter(const ApRouterConfig &config)
     m_started = true;
     return true;
 }
+#endif // ETHWIFI_AP_ROUTER
 
 wl_status_t EthWiFiManager::status() const
 {
@@ -283,6 +285,7 @@ bool EthWiFiManager::initWiFi()
     return true;
 }
 
+#if defined(ETHWIFI_AP_ROUTER)
 bool EthWiFiManager::initApRouter()
 {
     const auto &cfg = m_apRouterConfig;
@@ -312,13 +315,6 @@ bool EthWiFiManager::initApRouter()
 
     m_apNetif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
 
-    // Push a working DNS into the DHCP server before any client can connect.
-    // This guarantees Option 6 is correct from the very first DHCP offer.
-    if (cfg.apFallbackDns != IPAddress((uint32_t)0))
-    {
-        setApDhcpDns(toEspIp4(cfg.apFallbackDns).addr);
-    }
-
     esp_ip4_addr_t apIp = toEspIp4(cfg.apLocalIP);
     ESP_LOGI(m_config.logTag, "[AP] Started: SSID=%s IP=" IPSTR " auth=%s",
              cfg.apSsid, IP2STR(&apIp), hasPassword ? "WPA2-PSK" : "open");
@@ -339,29 +335,6 @@ bool EthWiFiManager::initApRouter()
     return true;
 }
 
-void EthWiFiManager::setApDhcpDns(uint32_t dnsAddr)
-{
-    if (m_apNetif == nullptr || dnsAddr == 0)
-    {
-        return;
-    }
-
-    // CONFIG_LWIP_DHCPS_ADD_DNS=y makes the DHCP server read the DNS from the
-    // global lwIP table (dns_getserver(0)) each time it starts.
-    // esp_netif_set_dns_info writes to that global table, so a stop→set→start
-    // cycle is all that is needed to update what clients receive in Option 6.
-    esp_netif_dns_info_t dns = {};
-    dns.ip.u_addr.ip4.addr = dnsAddr;
-    dns.ip.type = ESP_IPADDR_TYPE_V4;
-
-    esp_netif_dhcps_stop(m_apNetif);
-    esp_netif_set_dns_info(m_apNetif, ESP_NETIF_DNS_MAIN, &dns);
-    esp_netif_dhcps_start(m_apNetif);
-
-    ESP_LOGI(m_config.logTag, "[AP] DHCP DNS (Option 6) set to " IPSTR,
-             IP2STR(&dns.ip.u_addr.ip4));
-}
-
 void EthWiFiManager::updateApDns()
 {
     if (m_ethNetif == nullptr)
@@ -380,7 +353,6 @@ void EthWiFiManager::updateApDns()
     m_upstreamDns = dns.ip.u_addr.ip4.addr;
     ESP_LOGI(m_config.logTag, "[AP] Upstream DNS updated to " IPSTR " (from Ethernet)",
              IP2STR(&dns.ip.u_addr.ip4));
-    setApDhcpDns(dns.ip.u_addr.ip4.addr);
 }
 
 // ── DNS proxy ─────────────────────────────────────────────────────────────────
@@ -558,6 +530,7 @@ void EthWiFiManager::dnsProxyLoop()
     close(listenSock);
     ESP_LOGI(m_config.logTag, "[DNS] Forwarder stopped");
 }
+#endif // ETHWIFI_AP_ROUTER
 
 bool EthWiFiManager::probeSpiModule()
 {
@@ -993,11 +966,13 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
 
                     m_ethHasIp = true;
                     ESP_LOGI(m_config.logTag, "[ETH] Static IP applied");
+#if defined(ETHWIFI_AP_ROUTER)
                     if (m_apRouterMode)
                     {
                         updateApDns();
                     }
                     else
+#endif
                     {
                         stopWiFi();
                     }
@@ -1010,7 +985,9 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
         m_ethLinkUp = false;
         m_ethHasIp = false;
         ESP_LOGW(m_config.logTag, "[ETH] Link DOWN");
+#if defined(ETHWIFI_AP_ROUTER)
         if (!m_apRouterMode)
+#endif
         {
             ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
             startWiFi();
@@ -1034,11 +1011,13 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
         ESP_LOGI(m_config.logTag, "[ETH] IP=" IPSTR " GW=" IPSTR " MASK=" IPSTR " route=Ethernet",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
         m_ethHasIp = true;
+#if defined(ETHWIFI_AP_ROUTER)
         if (m_apRouterMode)
         {
             updateApDns();
         }
         else
+#endif
         {
             stopWiFi();
         }

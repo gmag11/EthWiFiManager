@@ -10,11 +10,15 @@
  * AP subnet  : 192.168.4.0/24  (assigned by the built-in DHCP server)
  * Ethernet   : whatever DHCP assigns from the upstream router
  *
+ * Prerequisites (build_flags in platformio.ini):
+ *   -DETHWIFI_AP_ROUTER
+ *
  * Prerequisites (sdkconfig / board_build.cmake_extra_args):
  *   CONFIG_LWIP_IP_FORWARD=y
  *   CONFIG_LWIP_IPV4_NAPT=y
  *
  * For PlatformIO add to platformio.ini:
+ *   build_flags = -DETHWIFI_AP_ROUTER
  *   board_build.cmake_extra_args =
  *       -DCONFIG_LWIP_IP_FORWARD=y
  *       -DCONFIG_LWIP_IPV4_NAPT=y

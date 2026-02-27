@@ -5,7 +5,7 @@ ESP32 library that manages connectivity with a preference for SPI Ethernet (W550
 ## Features
 
 - Combined mode: Ethernet preferred with WiFi fallback.
-- **AP-Router mode**: WiFi access point that shares an Ethernet connection via NAT — turn the ESP32 into a router.
+- **AP-Router mode** (opt-in with `-DETHWIFI_AP_ROUTER`): WiFi access point that shares an Ethernet connection via NAT — turn the ESP32 into a router. Includes a built-in DNS forwarder on port 53.
 - WiFi-only mode (disable Ethernet via configuration).
 - DHCP by default on both WiFi and Ethernet.
 - Optional static IP for WiFi and Ethernet via a `config(...)` style API.
@@ -60,7 +60,7 @@ The library supports all three SPI Ethernet modules available in ESP-IDF.
 Set `cfg.ethernet.spiModule` to select the chip; the default is `W5500`.
 
 | Value | Chip | SPI framing |
-|---|---|---|
+| --- | --- | --- |
 | `SpiModule::W5500` (default) | WIZnet W5500 | `command_bits=16`, `address_bits=8` |
 | `SpiModule::DM9051` | DAVICOM DM9051 | `command_bits=1`, `address_bits=7` |
 | `SpiModule::KSZ8851SNL` | Microchip KSZ8851SNL | `command_bits=16`, `address_bits=0` |
@@ -84,6 +84,7 @@ cfg.ethernet.intPin   = GPIO_NUM_10; // INT pin is mandatory — must be physica
 > `GPIO_NUM_NC` is rejected at init time; always wire the INT pin.
 
 Chip support is compiled in via Kconfig / `sdkconfig`:
+
 - `CONFIG_ETH_SPI_ETHERNET_W5500`
 - `CONFIG_ETH_SPI_ETHERNET_DM9051`
 - `CONFIG_ETH_SPI_ETHERNET_KSZ8851SNL`
@@ -105,7 +106,7 @@ cfg.ethernet.mode = EthWiFiManager::EthernetMode::Spi;          // SPI module
 ### Supported PHY chips
 
 | Value | Chip |
-|---|---|
+| --- | --- |
 | `EmacPhyChip::LAN8720` (default) | Microchip LAN8720 / LAN87xx family |
 | `EmacPhyChip::IP101` | IC Plus IP101 |
 | `EmacPhyChip::RTL8201` | Realtek RTL8201 |
@@ -130,9 +131,7 @@ cfg.ethernet.emacRmiiClockExtInput = true;        // true = PHY drives REF_CLK (
 
 > **RMII clock**: Most hobbyist modules (e.g. WT32-ETH01, Olimex ESP32-EVB) supply an external 50 MHz crystal to the PHY and route REF_CLK back to GPIO0 (`emacRmiiClockExtInput = true`).  
 > Set `emacRmiiClockExtInput = false` if your board instead expects the ESP32 to output the clock.
-
 > **Kconfig guards**: PHY drivers are gated by `CONFIG_ETH_PHY_IP101`, `CONFIG_ETH_PHY_RTL8201`, `CONFIG_ETH_PHY_LAN87XX`, `CONFIG_ETH_PHY_DP83848`, `CONFIG_ETH_PHY_KSZ80XX`. All are enabled by default in Arduino-ESP32.
-
 > **Compile-time safety**: `EthernetMode::InternalEmac` and the entire `EmacPhyChip` enum only exist when `CONFIG_ETH_USE_ESP32_EMAC` is defined (ESP32 classic). Attempting to use them on other targets (ESP32-S3, C3, etc.) results in a compile error.
 
 ## DHCP and Static IPs
@@ -159,7 +158,7 @@ cfg.ethernet.useDHCP();
 
 In AP-Router mode the ESP32 works like a router:
 
-```
+```text
 Internet ──► Ethernet (upstream) ──► ESP32 (NAT) ──► WiFi AP ──► client devices
 ```
 
@@ -167,18 +166,28 @@ Internet ──► Ethernet (upstream) ──► ESP32 (NAT) ──► WiFi AP �
 - Client devices connect to the ESP32's AP and receive an IP address automatically.
 - All client traffic is forwarded to the Ethernet interface via **NAT**, so it appears
   to the upstream network as if it came from the ESP32's Ethernet IP.
+- A **built-in DNS forwarder** listens on port 53 of the AP IP (`192.168.4.1`) and
+  forwards queries to the upstream DNS learned from Ethernet DHCP (or `apFallbackDns`
+  until Ethernet comes up). This works regardless of what DNS the DHCP server advertises.
 - The AP subnet (default `192.168.4.0/24`) must differ from the Ethernet subnet.
 
-### Enabling NAPT in the ESP-IDF / Arduino build
+> **AP-Router mode is disabled by default** to keep the binary small.
+> Enable it with `-DETHWIFI_AP_ROUTER` in `build_flags`.
 
-NAPT requires two lwIP Kconfig options:
+### Required build configuration
+
+**`build_flags`** (enables the AP-Router code):
+
+```ini
+build_flags = -DETHWIFI_AP_ROUTER
+```
+
+**`board_build.cmake_extra_args`** (enables NAPT in lwIP):
 
 | Option | Value |
-|---|---|
+| --- | --- |
 | `CONFIG_LWIP_IP_FORWARD` | `y` |
 | `CONFIG_LWIP_IPV4_NAPT` | `y` |
-
-For PlatformIO, add to `platformio.ini`:
 
 ```ini
 board_build.cmake_extra_args =
@@ -191,6 +200,7 @@ board_build.cmake_extra_args =
 ```cpp
 #include <EthWiFiManager.h>
 
+// Requires -DETHWIFI_AP_ROUTER in build_flags
 EthWiFiManager network;
 
 void setup() {
@@ -219,6 +229,9 @@ void setup() {
 }
 ```
 
-When the library logs `[AP] NAPT enabled`, AP clients can reach the internet through
-the Ethernet connection.  If NAPT is not available the library logs a warning with the
-sdkconfig options that need to be enabled.
+When the library logs `[AP] NAPT enabled`, AP clients can route traffic through
+the Ethernet connection. When the library logs `[DNS] Forwarder listening on port 53`,
+DNS queries from AP clients are transparently forwarded to the upstream DNS server.
+
+If NAPT is not available the library logs a warning with the sdkconfig options that
+need to be enabled.
