@@ -4,6 +4,19 @@
 
 EthWiFiManager *EthWiFiManager::s_instance = nullptr;
 
+void EthWiFiManager::onEvent(EventCallback cb)
+{
+    m_eventCallback = std::move(cb);
+}
+
+void EthWiFiManager::fireEvent(Event event, IPAddress ip)
+{
+    if (m_eventCallback)
+    {
+        m_eventCallback(event, ip);
+    }
+}
+
 static esp_ip4_addr_t toEspIp4(const IPAddress &ip)
 {
     esp_ip4_addr_t out = {};
@@ -48,6 +61,7 @@ bool EthWiFiManager::begin(const Config &config)
             {
                 ESP_LOGW(m_config.logTag, "SPI Ethernet module not detected - Ethernet disabled, WiFi only");
                 m_config.ethernet.enabled = false;
+                fireEvent(Event::EthernetDisabled);
             }
         }
 
@@ -94,6 +108,7 @@ bool EthWiFiManager::beginApRouter(const ApRouterConfig &config)
             {
                 ESP_LOGW(m_config.logTag, "SPI Ethernet module not detected - Ethernet disabled");
                 m_config.ethernet.enabled = false;
+                fireEvent(Event::EthernetDisabled);
             }
         }
 
@@ -937,6 +952,7 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
     case ETHERNET_EVENT_CONNECTED:
         m_ethLinkUp = true;
         m_ethHasIp = false;
+        fireEvent(Event::EthLinkUp);
 
         if (m_config.ethernet.useDhcp)
         {
@@ -989,6 +1005,8 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
 
                     m_ethHasIp = true;
                     ESP_LOGI(m_config.logTag, "[ETH] Static IP applied");
+                    fireEvent(Event::EthGotIP, m_config.ethernet.localIP);
+                    fireEvent(Event::InterfaceChanged, m_config.ethernet.localIP);
 #if defined(ETHWIFI_AP_ROUTER)
                     if (m_apRouterMode)
                     {
@@ -1008,6 +1026,8 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
         m_ethLinkUp = false;
         m_ethHasIp = false;
         ESP_LOGW(m_config.logTag, "[ETH] Link DOWN");
+        fireEvent(Event::EthLinkDown);
+        fireEvent(Event::InterfaceChanged);
 #if defined(ETHWIFI_AP_ROUTER)
         if (!m_apRouterMode)
 #endif
@@ -1034,6 +1054,11 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
         ESP_LOGI(m_config.logTag, "[ETH] IP=" IPSTR " GW=" IPSTR " MASK=" IPSTR " route=Ethernet",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
         m_ethHasIp = true;
+        {
+            const IPAddress ethIp(ev->ip_info.ip.addr);
+            fireEvent(Event::EthGotIP, ethIp);
+            fireEvent(Event::InterfaceChanged, ethIp);
+        }
 #if defined(ETHWIFI_AP_ROUTER)
         if (m_apRouterMode)
         {
@@ -1054,6 +1079,9 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
         {
             ESP_LOGI(m_config.logTag, "[WiFi] IP=" IPSTR " GW=" IPSTR " MASK=" IPSTR " route=WiFi",
                      IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
+            const IPAddress wifiIp(ev->ip_info.ip.addr);
+            fireEvent(Event::WiFiGotIP, wifiIp);
+            fireEvent(Event::InterfaceChanged, wifiIp);
         }
         else
         {
@@ -1070,14 +1098,24 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
 
 void EthWiFiManager::onWiFiEvent(int32_t eventId)
 {
+    if (eventId == WIFI_EVENT_STA_CONNECTED)
+    {
+        ESP_LOGD(m_config.logTag, "[WiFi] Associated");
+        fireEvent(Event::WiFiConnected);
+        return;
+    }
+
     if (eventId != WIFI_EVENT_STA_DISCONNECTED)
     {
         return;
     }
 
+    fireEvent(Event::WiFiDisconnected);
+
     if (!m_ethHasIp)
     {
         ESP_LOGW(m_config.logTag, "[WiFi] Disconnected, reconnecting...");
+        fireEvent(Event::InterfaceChanged);
         esp_wifi_connect();
         return;
     }

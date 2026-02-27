@@ -15,6 +15,7 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <sdkconfig.h>
+#include <functional>
 
 // ── AP-Router feature flag ─────────────────────────────────────────────────────
 // AP-Router mode (WiFi AP + Ethernet NAT + built-in DNS forwarder) is compiled
@@ -71,6 +72,24 @@ public:
         WiFi,
         Ethernet,
     };
+
+    /// Events reported to the user callback registered with onEvent().
+    enum class Event
+    {
+        EthLinkUp,          ///< Ethernet cable connected / carrier detected
+        EthLinkDown,        ///< Ethernet cable disconnected (IP is also lost)
+        EthGotIP,           ///< Ethernet obtained an IP address
+        WiFiConnected,      ///< WiFi STA associated with AP (layer 2 only)
+        WiFiDisconnected,   ///< WiFi STA disconnected from AP (IP is also lost)
+        WiFiGotIP,          ///< WiFi obtained an IP — only fired when Ethernet is not active
+        InterfaceChanged,   ///< Active interface changed (Eth<->WiFi or ->None)
+        EthernetDisabled,   ///< SPI module not detected at startup; Ethernet was disabled
+    };
+
+    /// Callback invoked on network state changes.
+    /// ip is the relevant address (0.0.0.0 if not applicable).
+    /// Called from the ESP-IDF event loop task — keep handlers short or defer work.
+    using EventCallback = std::function<void(Event event, IPAddress ip)>;
 
     enum class SpiModule
     {
@@ -245,6 +264,10 @@ public:
     ActiveInterface activeInterface() const;
     const char *activeInterfaceName() const;
 
+    /// Register a callback invoked on network state changes.
+    /// May be called before or after begin(). Replaces any previously registered callback.
+    void onEvent(EventCallback cb);
+
 private:
     static EthWiFiManager *s_instance;
 
@@ -273,6 +296,9 @@ private:
 
     volatile bool m_ethHasIp = false;
     volatile bool m_ethLinkUp = false;
+
+    EventCallback m_eventCallback;
+    void fireEvent(Event event, IPAddress ip = IPAddress((uint32_t)0));
 
     bool initCore();
     bool initWiFi();
