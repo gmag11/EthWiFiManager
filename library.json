@@ -19,5 +19,8 @@
   "export": {
     "exclude": [".vscode", "examples/"]
   },
+  "build": {
+    "srcDir": "src"
+  },
   "dependencies": {}
 }
