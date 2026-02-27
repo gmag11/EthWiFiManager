@@ -14,10 +14,13 @@
     "type": "git",
     "url": "https://github.com/gmag11/EthWiFiManager"
   },
-  "examples": "examples/*/*.ino",
+  "examples": "examples/*/*.cpp",
   "architectures": "esp32",
+  "build": {
+    "srcFilter": "+<src/>"
+  },
   "export": {
-    "exclude": [".vscode"]
+    "exclude": [".vscode", "examples/"]
   },
   "dependencies": {}
 }

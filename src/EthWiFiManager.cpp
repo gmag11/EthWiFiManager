@@ -63,6 +63,57 @@ bool EthWiFiManager::begin(const Config &config)
     return true;
 }
 
+#if defined(ETHWIFI_AP_ROUTER)
+bool EthWiFiManager::beginApRouter(const ApRouterConfig &config)
+{
+    if (m_started)
+    {
+        return true;
+    }
+
+    m_apRouterConfig = config;
+    m_config.logTag = (config.logTag != nullptr) ? config.logTag : "EthWiFiManager";
+    m_config.ethernet = config.ethernet;
+    s_instance = this;
+    m_apRouterMode = true;
+
+    if (!initCore())
+    {
+        return false;
+    }
+
+    if (m_config.ethernet.enabled)
+    {
+        bool ethernetOk = true;
+#if ETHWIFI_INTERNAL_EMAC
+        if (m_config.ethernet.mode == EthernetMode::Spi)
+#endif
+        {
+            ethernetOk = probeSpiModule();
+            if (!ethernetOk)
+            {
+                ESP_LOGW(m_config.logTag, "SPI Ethernet module not detected - Ethernet disabled");
+                m_config.ethernet.enabled = false;
+            }
+        }
+
+        if (ethernetOk && !initEthernet())
+        {
+            return false;
+        }
+    }
+
+    if (!initApRouter())
+    {
+        return false;
+    }
+
+    ESP_LOGI(m_config.logTag, "AP Router started (ethernet=%s)", m_config.ethernet.enabled ? "enabled" : "disabled");
+    m_started = true;
+    return true;
+}
+#endif // ETHWIFI_AP_ROUTER
+
 wl_status_t EthWiFiManager::status() const
 {
     if (m_ethHasIp)
@@ -234,6 +285,253 @@ bool EthWiFiManager::initWiFi()
     return true;
 }
 
+#if defined(ETHWIFI_AP_ROUTER)
+bool EthWiFiManager::initApRouter()
+{
+    const auto &cfg = m_apRouterConfig;
+
+    // Configure AP IP addressing and DHCP server range before starting the AP.
+    // softAPConfig stops/restarts the DHCP server with the new address range.
+    if (!WiFi.softAPConfig(cfg.apLocalIP, cfg.apGateway, cfg.apSubnet))
+    {
+        ESP_LOGE(m_config.logTag, "[AP] softAPConfig failed");
+        return false;
+    }
+
+    // Start the WiFi AP (initialises the WiFi driver, sets AP mode, applies config).
+    const bool hasPassword = (cfg.apPassword != nullptr && strlen(cfg.apPassword) >= 8);
+    const bool started = WiFi.softAP(
+        cfg.apSsid,
+        hasPassword ? cfg.apPassword : nullptr,
+        cfg.apChannel,
+        0,                      // ssid_hidden = 0 (broadcast)
+        cfg.apMaxConnections);
+
+    if (!started)
+    {
+        ESP_LOGE(m_config.logTag, "[AP] WiFi.softAP failed");
+        return false;
+    }
+
+    m_apNetif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+
+    esp_ip4_addr_t apIp = toEspIp4(cfg.apLocalIP);
+    ESP_LOGI(m_config.logTag, "[AP] Started: SSID=%s IP=" IPSTR " auth=%s",
+             cfg.apSsid, IP2STR(&apIp), hasPassword ? "WPA2-PSK" : "open");
+
+#if defined(CONFIG_LWIP_IPV4_NAPT) && CONFIG_LWIP_IPV4_NAPT
+    // ip_napt_enable modifies lwIP internal timers — must hold the TCPIP core lock.
+    LOCK_TCPIP_CORE();
+    ip_napt_enable(apIp.addr, 1);
+    UNLOCK_TCPIP_CORE();
+    ESP_LOGI(m_config.logTag, "[AP] NAPT enabled — AP clients routed via Ethernet IP");
+#else
+    ESP_LOGW(m_config.logTag,
+             "[AP] NAPT not available — add CONFIG_LWIP_IP_FORWARD=y and "
+             "CONFIG_LWIP_IPV4_NAPT=y to sdkconfig (or board_build.cmake_extra_args)");
+#endif
+
+    startDnsProxy();
+    return true;
+}
+
+void EthWiFiManager::updateApDns()
+{
+    if (m_ethNetif == nullptr)
+    {
+        return;
+    }
+
+    esp_netif_dns_info_t dns = {};
+    if (esp_netif_get_dns_info(m_ethNetif, ESP_NETIF_DNS_MAIN, &dns) != ESP_OK ||
+        dns.ip.u_addr.ip4.addr == 0)
+    {
+        ESP_LOGW(m_config.logTag, "[AP] Ethernet DNS not available — keeping fallback DNS");
+        return;
+    }
+
+    m_upstreamDns = dns.ip.u_addr.ip4.addr;
+    ESP_LOGI(m_config.logTag, "[AP] Upstream DNS updated to " IPSTR " (from Ethernet)",
+             IP2STR(&dns.ip.u_addr.ip4));
+}
+
+// ── DNS proxy ─────────────────────────────────────────────────────────────────
+
+void EthWiFiManager::startDnsProxy()
+{
+    if (m_dnsProxyTask != nullptr)
+    {
+        return; // already running
+    }
+
+    // Seed upstream DNS from the configured fallback so queries work
+    // immediately, before Ethernet comes up.
+    if (m_apRouterConfig.apFallbackDns != IPAddress((uint32_t)0))
+    {
+        m_upstreamDns = toEspIp4(m_apRouterConfig.apFallbackDns).addr;
+    }
+
+    xTaskCreate(dnsProxyTaskThunk, "dns_proxy", 4096, this, 5, &m_dnsProxyTask);
+    ESP_LOGI(m_config.logTag, "[DNS] Proxy started (fallback upstream: " IPSTR ")",
+             IP2STR((ip4_addr_t *)&m_upstreamDns));
+}
+
+void EthWiFiManager::stopDnsProxy()
+{
+    if (m_dnsProxyTask == nullptr)
+    {
+        return;
+    }
+    xTaskNotifyGive(m_dnsProxyTask);
+    // Give the task a moment to exit cleanly; it will set m_dnsProxyTask = nullptr.
+    for (int i = 0; i < 20 && m_dnsProxyTask != nullptr; ++i)
+    {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+void EthWiFiManager::dnsProxyTaskThunk(void *arg)
+{
+    static_cast<EthWiFiManager *>(arg)->dnsProxyLoop();
+    // Clear handle so startDnsProxy() can be called again if needed.
+    static_cast<EthWiFiManager *>(arg)->m_dnsProxyTask = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void EthWiFiManager::dnsProxyLoop()
+{
+    // --- listen socket ---------------------------------------------------
+    int listenSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (listenSock < 0)
+    {
+        ESP_LOGE(m_config.logTag, "[DNS] socket() failed: errno %d", errno);
+        return;
+    }
+    int flag = 1;
+    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+    fcntl(listenSock, F_SETFL, O_NONBLOCK);
+
+    struct sockaddr_in bindAddr = {};
+    bindAddr.sin_family      = AF_INET;
+    bindAddr.sin_port        = htons(DNS_PROXY_PORT);
+    bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(listenSock, (struct sockaddr *)&bindAddr, sizeof(bindAddr)) < 0)
+    {
+        ESP_LOGE(m_config.logTag, "[DNS] bind() failed: errno %d", errno);
+        close(listenSock);
+        return;
+    }
+    ESP_LOGI(m_config.logTag, "[DNS] Forwarder listening on port %d", DNS_PROXY_PORT);
+
+    // --- pending-query table ---------------------------------------------
+    struct PendingEntry
+    {
+        int             upSock;
+        struct sockaddr_in client;
+        uint32_t        expireMs;
+        bool            active;
+    };
+    PendingEntry table[DNS_PROXY_PENDING] = {};
+
+    static constexpr int DNS_BUF = 512;
+    uint8_t buf[DNS_BUF];
+
+    // --- main loop -------------------------------------------------------
+    while (ulTaskNotifyTake(pdTRUE, 0) == 0)
+    {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(listenSock, &readSet);
+        int maxFd = listenSock;
+
+        // Reap timed-out entries; add active ones to select set.
+        uint32_t now = millis();
+        for (int i = 0; i < DNS_PROXY_PENDING; ++i)
+        {
+            if (!table[i].active) continue;
+            if ((int32_t)(now - table[i].expireMs) >= 0)
+            {
+                close(table[i].upSock);
+                table[i].active = false;
+                continue;
+            }
+            FD_SET(table[i].upSock, &readSet);
+            if (table[i].upSock > maxFd) maxFd = table[i].upSock;
+        }
+
+        struct timeval tv = {0, 100000}; // 100 ms
+        if (select(maxFd + 1, &readSet, nullptr, nullptr, &tv) <= 0) continue;
+
+        // Handle upstream responses.
+        for (int i = 0; i < DNS_PROXY_PENDING; ++i)
+        {
+            if (!table[i].active || !FD_ISSET(table[i].upSock, &readSet)) continue;
+            int len = recv(table[i].upSock, buf, DNS_BUF, 0);
+            if (len > 0)
+            {
+                sendto(listenSock, buf, len, 0,
+                       (struct sockaddr *)&table[i].client, sizeof(table[i].client));
+            }
+            close(table[i].upSock);
+            table[i].active = false;
+        }
+
+        // Handle new client queries.
+        if (!FD_ISSET(listenSock, &readSet)) continue;
+        struct sockaddr_in clientAddr = {};
+        socklen_t clientLen = sizeof(clientAddr);
+        int len = recvfrom(listenSock, buf, DNS_BUF, 0,
+                           (struct sockaddr *)&clientAddr, &clientLen);
+        if (len <= 0) continue;
+
+        uint32_t upstream = m_upstreamDns;
+        if (upstream == 0)
+        {
+            ESP_LOGD(m_config.logTag, "[DNS] Query received but no upstream DNS yet — dropped");
+            continue;
+        }
+
+        // Find a free slot.
+        int slot = -1;
+        for (int i = 0; i < DNS_PROXY_PENDING; ++i)
+        {
+            if (!table[i].active) { slot = i; break; }
+        }
+        if (slot < 0)
+        {
+            ESP_LOGW(m_config.logTag, "[DNS] Proxy table full — query dropped");
+            continue;
+        }
+
+        int upSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (upSock < 0) continue;
+        fcntl(upSock, F_SETFL, O_NONBLOCK);
+
+        struct sockaddr_in upAddr = {};
+        upAddr.sin_family      = AF_INET;
+        upAddr.sin_port        = htons(53);
+        upAddr.sin_addr.s_addr = upstream;
+
+        if (sendto(upSock, buf, len, 0,
+                   (struct sockaddr *)&upAddr, sizeof(upAddr)) < 0)
+        {
+            close(upSock);
+            continue;
+        }
+
+        table[slot] = {upSock, clientAddr, millis() + DNS_PROXY_TIMEOUT, true};
+    }
+
+    // Cleanup.
+    for (int i = 0; i < DNS_PROXY_PENDING; ++i)
+    {
+        if (table[i].active) close(table[i].upSock);
+    }
+    close(listenSock);
+    ESP_LOGI(m_config.logTag, "[DNS] Forwarder stopped");
+}
+#endif // ETHWIFI_AP_ROUTER
+
 bool EthWiFiManager::probeSpiModule()
 {
     const auto &eth = m_config.ethernet;
@@ -375,16 +673,34 @@ bool EthWiFiManager::initEthernet()
     if (m_config.ethernet.mode == EthernetMode::InternalEmac)
     {
         // ---- Internal RMII EMAC (ESP32 classic) ----
-        // eth_mac_config_t holds MDC/MDIO pins and RMII clock config for ESP32 internal EMAC
         eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
+        macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        // IDF 5.x: EMAC-specific config moved to eth_esp32_emac_config_t
+        eth_esp32_emac_config_t emacCfg = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+        // smi_mdc/mdio_gpio_num are deprecated in IDF 5.4+ (replaced by smi_gpio struct)
+        // but remain functional; suppress the warning for portability across IDF 5.x.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        emacCfg.smi_mdc_gpio_num  = m_config.ethernet.emacMdcPin;
+        emacCfg.smi_mdio_gpio_num = m_config.ethernet.emacMdioPin;
+#pragma GCC diagnostic pop
+        emacCfg.clock_config.rmii.clock_mode =
+            m_config.ethernet.emacRmiiClockExtInput ? EMAC_CLK_EXT_IN : EMAC_CLK_OUT;
+        emacCfg.clock_config.rmii.clock_gpio =
+            (emac_rmii_clock_gpio_t)(int)m_config.ethernet.emacRmiiRefClkPin;
+        mac = esp_eth_mac_new_esp32(&emacCfg, &macCfg);
+#else
+        // IDF 4.x: EMAC config is directly in eth_mac_config_t
         macCfg.smi_mdc_gpio_num   = m_config.ethernet.emacMdcPin;
         macCfg.smi_mdio_gpio_num  = m_config.ethernet.emacMdioPin;
-        macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
         macCfg.clock_config.rmii.clock_mode =
             m_config.ethernet.emacRmiiClockExtInput ? EMAC_CLK_EXT_IN : EMAC_CLK_OUT;
         macCfg.clock_config.rmii.clock_gpio =
             (emac_rmii_clock_gpio_t)(int)m_config.ethernet.emacRmiiRefClkPin;
         mac = esp_eth_mac_new_esp32(&macCfg);
+#endif // ESP_IDF_VERSION
 
         eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
         phyCfg.phy_addr       = m_config.ethernet.emacPhyAddr;
@@ -395,8 +711,13 @@ bool EthWiFiManager::initEthernet()
         case EmacPhyChip::IP101:   phy = esp_eth_phy_new_ip101(&phyCfg);   break;
         case EmacPhyChip::RTL8201: phy = esp_eth_phy_new_rtl8201(&phyCfg); break;
         case EmacPhyChip::DP83848: phy = esp_eth_phy_new_dp83848(&phyCfg); break;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        case EmacPhyChip::KSZ8041:
+        case EmacPhyChip::KSZ8081: phy = esp_eth_phy_new_ksz80xx(&phyCfg); break;
+#else
         case EmacPhyChip::KSZ8041: phy = esp_eth_phy_new_ksz8041(&phyCfg); break;
         case EmacPhyChip::KSZ8081: phy = esp_eth_phy_new_ksz8081(&phyCfg); break;
+#endif
         case EmacPhyChip::LAN8720:
         default:                   phy = esp_eth_phy_new_lan87xx(&phyCfg); break;
         }
@@ -464,13 +785,6 @@ bool EthWiFiManager::initEthernet()
             return false;
         }
 
-        err = spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &m_spiHandle);
-        if (err != ESP_OK)
-        {
-            ESP_LOGE(m_config.logTag, "spi_bus_add_device failed: %s", esp_err_to_name(err));
-            return false;
-        }
-
         eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
         macCfg.rx_task_stack_size = m_config.ethernet.macRxTaskStackSize;
         eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
@@ -481,7 +795,7 @@ bool EthWiFiManager::initEthernet()
 #if ETHWIFI_DM9051
         case SpiModule::DM9051:
         {
-            eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(m_spiHandle);
+            eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(m_config.ethernet.spiHost, &m_spiDevCfg);
             dm9051Cfg.int_gpio_num = m_config.ethernet.intPin;
             mac = esp_eth_mac_new_dm9051(&dm9051Cfg, &macCfg);
             phy = esp_eth_phy_new_dm9051(&phyCfg);
@@ -493,7 +807,7 @@ bool EthWiFiManager::initEthernet()
 #if ETHWIFI_KSZ8851SNL
         case SpiModule::KSZ8851SNL:
         {
-            eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(m_spiHandle);
+            eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(m_config.ethernet.spiHost, &m_spiDevCfg);
             kszCfg.int_gpio_num = m_config.ethernet.intPin;
             mac = esp_eth_mac_new_ksz8851snl(&kszCfg, &macCfg);
             phy = esp_eth_phy_new_ksz8851snl(&phyCfg);
@@ -505,7 +819,7 @@ bool EthWiFiManager::initEthernet()
 #if ETHWIFI_W5500
         case SpiModule::W5500:
         {
-            eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_spiHandle);
+            eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_config.ethernet.spiHost, &m_spiDevCfg);
             w5500Cfg.int_gpio_num = m_config.ethernet.intPin;
             mac = esp_eth_mac_new_w5500(&w5500Cfg, &macCfg);
             phy = esp_eth_phy_new_w5500(&phyCfg);
@@ -675,7 +989,16 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
 
                     m_ethHasIp = true;
                     ESP_LOGI(m_config.logTag, "[ETH] Static IP applied");
-                    stopWiFi();
+#if defined(ETHWIFI_AP_ROUTER)
+                    if (m_apRouterMode)
+                    {
+                        updateApDns();
+                    }
+                    else
+#endif
+                    {
+                        stopWiFi();
+                    }
                 }
             }
         }
@@ -685,8 +1008,13 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
         m_ethLinkUp = false;
         m_ethHasIp = false;
         ESP_LOGW(m_config.logTag, "[ETH] Link DOWN");
-        ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
-        startWiFi();
+#if defined(ETHWIFI_AP_ROUTER)
+        if (!m_apRouterMode)
+#endif
+        {
+            ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
+            startWiFi();
+        }
         break;
 
     case ETHERNET_EVENT_START:
@@ -706,7 +1034,16 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
         ESP_LOGI(m_config.logTag, "[ETH] IP=" IPSTR " GW=" IPSTR " MASK=" IPSTR " route=Ethernet",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
         m_ethHasIp = true;
-        stopWiFi();
+#if defined(ETHWIFI_AP_ROUTER)
+        if (m_apRouterMode)
+        {
+            updateApDns();
+        }
+        else
+#endif
+        {
+            stopWiFi();
+        }
         return;
     }
 
