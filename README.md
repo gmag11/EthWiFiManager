@@ -176,14 +176,14 @@ NAPT requires two lwIP Kconfig options:
 | Option | Value |
 |---|---|
 | `CONFIG_LWIP_IP_FORWARD` | `y` |
-| `CONFIG_LWIP_IP_NAPT` | `y` |
+| `CONFIG_LWIP_IPV4_NAPT` | `y` |
 
 For PlatformIO, add to `platformio.ini`:
 
 ```ini
 board_build.cmake_extra_args =
     -DCONFIG_LWIP_IP_FORWARD=y
-    -DCONFIG_LWIP_IP_NAPT=y
+    -DCONFIG_LWIP_IPV4_NAPT=y
 ```
 
 ### Example

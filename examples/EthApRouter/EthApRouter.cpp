@@ -12,12 +12,12 @@
  *
  * Prerequisites (sdkconfig / board_build.cmake_extra_args):
  *   CONFIG_LWIP_IP_FORWARD=y
- *   CONFIG_LWIP_IP_NAPT=y
+ *   CONFIG_LWIP_IPV4_NAPT=y
  *
  * For PlatformIO add to platformio.ini:
  *   board_build.cmake_extra_args =
  *       -DCONFIG_LWIP_IP_FORWARD=y
- *       -DCONFIG_LWIP_IP_NAPT=y
+ *       -DCONFIG_LWIP_IPV4_NAPT=y
  */
 
 #include <Arduino.h>
@@ -56,6 +56,8 @@ void setup()
     config.apLocalIP = IPAddress(192, 168, 4, 1);
     config.apGateway = IPAddress(192, 168, 4, 1);
     config.apSubnet  = IPAddress(255, 255, 255, 0);
+
+    delay(2000);
 
     if (!network.beginApRouter(config))
     {
