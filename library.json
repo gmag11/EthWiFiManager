@@ -1,7 +1,7 @@
 {
   "name": "EthWiFiManager",
   "frameworks": "arduino",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "keywords": ["ethernet", "w5500", "wifi", "esp32", "network"],
   "platforms": ["espressif32"],
   "description": "ESP32 library that manages connectivity with a preference for W5500 Ethernet and automatic fallback to WiFi.",

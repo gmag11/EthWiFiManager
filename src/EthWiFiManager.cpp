@@ -996,7 +996,13 @@ bool EthWiFiManager::initEthernet()
 #if ETHWIFI_DM9051
         case SpiModule::DM9051:
         {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
             eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(m_config.ethernet.spiHost, &m_spiDevCfg);
+#else
+            spi_device_handle_t spiHandleDm;
+            spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &spiHandleDm);
+            eth_dm9051_config_t dm9051Cfg = ETH_DM9051_DEFAULT_CONFIG(spiHandleDm);
+#endif // ESP_IDF_VERSION
             dm9051Cfg.int_gpio_num = m_config.ethernet.intPin;
             mac = esp_eth_mac_new_dm9051(&dm9051Cfg, &macCfg);
             phy = esp_eth_phy_new_dm9051(&phyCfg);
@@ -1008,7 +1014,13 @@ bool EthWiFiManager::initEthernet()
 #if ETHWIFI_KSZ8851SNL
         case SpiModule::KSZ8851SNL:
         {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
             eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(m_config.ethernet.spiHost, &m_spiDevCfg);
+#else
+            spi_device_handle_t spiHandleKsz;
+            spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &spiHandleKsz);
+            eth_ksz8851snl_config_t kszCfg = ETH_KSZ8851SNL_DEFAULT_CONFIG(spiHandleKsz);
+#endif // ESP_IDF_VERSION
             kszCfg.int_gpio_num = m_config.ethernet.intPin;
             mac = esp_eth_mac_new_ksz8851snl(&kszCfg, &macCfg);
             phy = esp_eth_phy_new_ksz8851snl(&phyCfg);
@@ -1020,7 +1032,13 @@ bool EthWiFiManager::initEthernet()
 #if ETHWIFI_W5500
         case SpiModule::W5500:
         {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
             eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(m_config.ethernet.spiHost, &m_spiDevCfg);
+#else
+            spi_device_handle_t spiHandleW5;
+            spi_bus_add_device(m_config.ethernet.spiHost, &m_spiDevCfg, &spiHandleW5);
+            eth_w5500_config_t w5500Cfg = ETH_W5500_DEFAULT_CONFIG(spiHandleW5);
+#endif // ESP_IDF_VERSION
             w5500Cfg.int_gpio_num = m_config.ethernet.intPin;
             mac = esp_eth_mac_new_w5500(&w5500Cfg, &macCfg);
             phy = esp_eth_phy_new_w5500(&phyCfg);
