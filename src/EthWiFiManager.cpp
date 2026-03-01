@@ -1362,8 +1362,15 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
         if (!m_apRouterMode)
 #endif
         {
-            ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
-            startWiFi();
+            if (m_wifiEnabled)
+            {
+                ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
+                startWiFi();
+            }
+            else
+            {
+                ESP_LOGD(m_config.logTag, "[WiFi] Fallback suppressed (WiFi disabled by user)");
+            }
         }
         break;
 
