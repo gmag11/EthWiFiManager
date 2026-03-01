@@ -311,6 +311,66 @@ public:
     /// Returns true when the soft-AP is currently active.
     bool isAPActive() const;
 
+    // ── Unified status ────────────────────────────────────────────────────────
+
+    /// Returns true when any interface (Ethernet or WiFi STA) has a valid IP.
+    /// Equivalent to ethernetHasIP() || (status() == WL_CONNECTED).
+    bool isConnected() const;
+
+    /// Returns the IP address of the soft-AP interface.
+    /// Returns 0.0.0.0 when the AP is not active.
+    IPAddress apLocalIP() const;
+
+    /// Returns the current IP of the Ethernet interface only.
+    /// Returns 0.0.0.0 when Ethernet has no IP (useful in BOTH mode).
+    IPAddress getEthernetIP() const;
+
+    /// Returns the current IP of the WiFi STA interface only.
+    /// Returns 0.0.0.0 when WiFi STA has no IP (useful in BOTH mode).
+    IPAddress getWiFiIP() const;
+
+    // ── WiFi scan API (thin wrappers) ─────────────────────────────────────────
+
+    /// Start a WiFi network scan.
+    /// Pass async=true to return immediately (WIFI_SCAN_RUNNING = -1) and poll
+    /// scanComplete() for the result. Returns the number of found networks on
+    /// completion, or WIFI_SCAN_RUNNING / WIFI_SCAN_FAILED.
+    int16_t scanNetworks(bool async = false, bool show_hidden = false,
+                         bool passive = false, uint32_t max_ms_per_chan = 300,
+                         uint8_t channel = 0);
+
+    /// Poll a running async scan.
+    /// Returns the number of found networks, WIFI_SCAN_RUNNING, or WIFI_SCAN_FAILED.
+    int16_t scanComplete() const;
+
+    /// Free the memory allocated for the last scan results.
+    void scanDelete();
+
+    /// SSID of the i-th network returned by the last scanNetworks() call.
+    String scannedSSID(uint8_t i) const;
+
+    /// RSSI (signal strength) of the i-th scanned network (dBm).
+    int32_t scannedRSSI(uint8_t i) const;
+
+    /// Authentication mode of the i-th scanned network.
+    wifi_auth_mode_t scannedEncryptionType(uint8_t i) const;
+
+    /// Channel of the i-th scanned network.
+    int32_t scannedChannel(uint8_t i) const;
+
+    // ── Credential management ─────────────────────────────────────────────────
+
+    /// Update WiFi SSID and password without triggering a reconnection.
+    /// Call reconnect() afterwards to apply the new credentials.
+    /// The caller is responsible for keeping the pointed-to strings alive.
+    void setWiFiCredentials(const char *ssid, const char *password);
+
+    /// Force a clean WiFi reconnection using the current credentials.
+    /// Unlike disableWiFi() + enableWiFi(), this does NOT emit a WiFiDisconnected
+    /// event caused by an explicit disable, so observers see a natural reconnect.
+    /// No-op when WiFi is disabled via disableWiFi().
+    bool reconnect();
+
 private:
     static EthWiFiManager *s_instance;
 

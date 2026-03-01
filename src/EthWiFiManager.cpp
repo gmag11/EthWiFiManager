@@ -433,6 +433,132 @@ bool EthWiFiManager::isAPActive() const
     return m_apActive;
 }
 
+// ── Unified status ────────────────────────────────────────────────────────────
+
+bool EthWiFiManager::isConnected() const
+{
+    return m_ethHasIp || (WiFi.status() == WL_CONNECTED);
+}
+
+IPAddress EthWiFiManager::apLocalIP() const
+{
+    if (!m_apActive)
+    {
+        return IPAddress((uint32_t)0);
+    }
+    esp_netif_t *apNetif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (apNetif != nullptr)
+    {
+        esp_netif_ip_info_t info = {};
+        if (esp_netif_get_ip_info(apNetif, &info) == ESP_OK)
+        {
+            return IPAddress(info.ip.addr);
+        }
+    }
+    // Fallback to the configured value when the netif is not yet up.
+    return m_apConfig.localIP;
+}
+
+IPAddress EthWiFiManager::getEthernetIP() const
+{
+    if (m_ethNetif == nullptr)
+    {
+        return IPAddress((uint32_t)0);
+    }
+    esp_netif_ip_info_t info = {};
+    if (esp_netif_get_ip_info(m_ethNetif, &info) == ESP_OK)
+    {
+        return IPAddress(info.ip.addr);
+    }
+    return IPAddress((uint32_t)0);
+}
+
+IPAddress EthWiFiManager::getWiFiIP() const
+{
+    esp_netif_t *netif = wifiNetif();
+    if (netif == nullptr)
+    {
+        return IPAddress((uint32_t)0);
+    }
+    esp_netif_ip_info_t info = {};
+    if (esp_netif_get_ip_info(netif, &info) == ESP_OK)
+    {
+        return IPAddress(info.ip.addr);
+    }
+    return IPAddress((uint32_t)0);
+}
+
+// ── WiFi scan API ─────────────────────────────────────────────────────────────
+
+int16_t EthWiFiManager::scanNetworks(bool async, bool show_hidden, bool passive,
+                                     uint32_t max_ms_per_chan, uint8_t channel)
+{
+    return WiFi.scanNetworks(async, show_hidden, passive, max_ms_per_chan, channel);
+}
+
+int16_t EthWiFiManager::scanComplete() const
+{
+    return WiFi.scanComplete();
+}
+
+void EthWiFiManager::scanDelete()
+{
+    WiFi.scanDelete();
+}
+
+String EthWiFiManager::scannedSSID(uint8_t i) const
+{
+    return WiFi.SSID(i);
+}
+
+int32_t EthWiFiManager::scannedRSSI(uint8_t i) const
+{
+    return WiFi.RSSI(i);
+}
+
+wifi_auth_mode_t EthWiFiManager::scannedEncryptionType(uint8_t i) const
+{
+    return WiFi.encryptionType(i);
+}
+
+int32_t EthWiFiManager::scannedChannel(uint8_t i) const
+{
+    return WiFi.channel(i);
+}
+
+// ── Credential management ─────────────────────────────────────────────────────
+
+void EthWiFiManager::setWiFiCredentials(const char *ssid, const char *password)
+{
+    m_config.wifi.ssid     = ssid;
+    m_config.wifi.password = password;
+    ESP_LOGI(m_config.logTag, "[WiFi] Credentials updated (ssid=%s) — call reconnect() to apply",
+             ssid != nullptr ? ssid : "<null>");
+}
+
+bool EthWiFiManager::reconnect()
+{
+    if (!m_started)
+    {
+        ESP_LOGW(m_config.logTag, "reconnect: call begin() first");
+        return false;
+    }
+
+    if (!m_wifiEnabled)
+    {
+        ESP_LOGW(m_config.logTag, "reconnect: WiFi is disabled, call enableWiFi() first");
+        return false;
+    }
+
+    ESP_LOGI(m_config.logTag, "[WiFi] Forcing reconnect (ssid=%s)",
+             m_config.wifi.ssid != nullptr ? m_config.wifi.ssid : "<null>");
+    // Disconnect without touching m_wifiEnabled so the STA_DISCONNECTED handler
+    // does not fire a "WiFi disabled" path and observers see a normal reconnect.
+    WiFi.disconnect(false, false);
+    startWiFi();
+    return true;
+}
+
 bool EthWiFiManager::initCore()
 {
     esp_err_t err = esp_event_loop_create_default();
