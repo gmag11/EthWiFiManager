@@ -39,6 +39,12 @@ bool EthWiFiManager::begin(const Config &config)
 
     s_instance = this;
 
+    // Honour WiFiConfig::enabled before any event handler fires (e.g. during
+    // initEthernet() a cable-absent board fires ETHERNET_EVENT_DISCONNECTED
+    // synchronously, which would call startWiFi() before begin() returns and
+    // before the caller can call disableWiFi()).
+    m_wifiEnabled = m_config.wifi.enabled;
+
     if (!initCore())
     {
         return false;
@@ -71,8 +77,13 @@ bool EthWiFiManager::begin(const Config &config)
         }
     }
 
-    startWiFi();
-    ESP_LOGI(m_config.logTag, "Manager started (ethernet=%s)", m_config.ethernet.enabled ? "enabled" : "disabled");
+    if (m_wifiEnabled)
+    {
+        startWiFi();
+    }
+    ESP_LOGI(m_config.logTag, "Manager started (ethernet=%s, wifi=%s)",
+             m_config.ethernet.enabled ? "enabled" : "disabled",
+             m_wifiEnabled ? "enabled" : "disabled");
     m_started = true;
     return true;
 }

@@ -122,6 +122,7 @@ public:
 
     struct WiFiConfig
     {
+        bool enabled = true;          ///< false = WiFi disabled from boot (e.g. ETH_ONLY mode)
         const char *ssid = nullptr;
         const char *password = nullptr;
         bool autoReconnect = true;
