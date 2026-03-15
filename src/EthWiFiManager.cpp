@@ -1041,8 +1041,8 @@ bool EthWiFiManager::initEthernet()
 #endif // ESP_IDF_VERSION
 
         eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
-        phyCfg.phy_addr       = m_config.ethernet.emacPhyAddr;
-        phyCfg.reset_gpio_num = m_config.ethernet.emacPhyResetPin;
+        phyCfg.phy_addr             = m_config.ethernet.emacPhyAddr;
+        phyCfg.reset_gpio_num       = m_config.ethernet.emacPhyResetPin;
 
         switch (m_config.ethernet.emacPhyChip)
         {
@@ -1376,7 +1376,18 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
             if (m_wifiEnabled)
             {
                 ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
-                startWiFi();
+                // If WiFi already has an IP there is nothing to do: it is already the
+                // active route.  Calling startWiFi() here would force a spurious
+                // disconnect + reconnect cycle that breaks connectivity during transient
+                // ETH link flaps (e.g. the LAN8720 boot-time auto-negotiation jitter).
+                if (WiFi.status() != WL_CONNECTED)
+                {
+                    startWiFi();
+                }
+                else
+                {
+                    ESP_LOGD(m_config.logTag, "[WiFi] Already connected, keeping existing connection");
+                }
             }
             else
             {

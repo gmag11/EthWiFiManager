@@ -2,10 +2,17 @@
  * InternalEmac — ESP32 internal RMII EMAC example
  *
  * Connects using the ESP32's built-in Ethernet MAC paired with an external
- * PHY (default: LAN8720) over RMII, with WiFi as fallback.
+ * PHY (LAN8720A) over RMII, with WiFi as fallback.
  *
- * Adjust PHY type, pins, and WiFi credentials to match your hardware.
- * Common boards: WT32-ETH01, Olimex ESP32-EVB, ESP32-Gateway, etc.
+ * Default pin assignment matches the WT32-ETH01 / WT32-ETH02 boards:
+ *   MDC      → GPIO23
+ *   MDIO     → GPIO18
+ *   REF_CLK  → GPIO0  (50 MHz input from on-board oscillator via LAN8720A)
+ *   PHY rst  → GPIO16
+ *   PHY addr → 1
+ *
+ * For other boards (Olimex ESP32-EVB, ESP32-Gateway, etc.) adjust the pins
+ * and clock direction below.
  *
  * Compatible targets: ESP32 classic ONLY (CONFIG_ETH_USE_ESP32_EMAC).
  * This file compiles to an empty unit on targets without an internal EMAC.
@@ -57,12 +64,12 @@ void setup()
     config.ethernet.enabled               = true;
     config.ethernet.mode                  = EthWiFiManager::EthernetMode::InternalEmac;
     config.ethernet.emacPhyChip           = EthWiFiManager::EmacPhyChip::LAN8720;
-    config.ethernet.emacPhyAddr           = 1;           // SMI address (0 or 1 on most boards)
-    config.ethernet.emacMdcPin            = GPIO_NUM_23; // MDC
-    config.ethernet.emacMdioPin           = GPIO_NUM_18; // MDIO
-    config.ethernet.emacPhyResetPin       = GPIO_NUM_NC; // set to reset pin if wired
-    config.ethernet.emacRmiiRefClkPin     = GPIO_NUM_0;  // REF_CLK input from PHY → GPIO0
-    config.ethernet.emacRmiiClockExtInput = true;         // PHY provides the 50 MHz REF_CLK
+    config.ethernet.emacPhyAddr           = 1;            // SMI address — 1 on WT32-ETH01/ETH02
+    config.ethernet.emacMdcPin            = GPIO_NUM_23;  // MDC
+    config.ethernet.emacMdioPin           = GPIO_NUM_18;  // MDIO
+    config.ethernet.emacPhyResetPin       = GPIO_NUM_16;  // Power/reset — GPIO16 on WT32-ETH01/ETH02
+    config.ethernet.emacRmiiRefClkPin     = GPIO_NUM_0;   // REF_CLK input from on-board oscillator
+    config.ethernet.emacRmiiClockExtInput = true;          // External 50 MHz oscillator drives REF_CLK
 
     network.begin(config);
 }
