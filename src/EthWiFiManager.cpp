@@ -1,5 +1,6 @@
 #include "EthWiFiManager.h"
 
+#include <lwip/dns.h>
 #include <lwip/ip4_addr.h>
 
 EthWiFiManager *EthWiFiManager::s_instance = nullptr;
@@ -14,6 +15,27 @@ void EthWiFiManager::fireEvent(Event event, IPAddress ip)
     if (m_eventCallback)
     {
         m_eventCallback(event, ip);
+    }
+}
+
+/// Copy DNS servers stored in a netif's DHCP-populated table into lwIP's
+/// global DNS slots.  lwIP's getaddrinfo() always queries the global slots,
+/// so this must be refreshed every time the active (default-route) interface
+/// changes — otherwise the global slots still point at the now-unreachable
+/// DNS of the previous interface.
+static void applyDnsFromNetif(esp_netif_t *netif)
+{
+    if (netif == nullptr)
+        return;
+    const esp_netif_dns_type_t types[2] = {ESP_NETIF_DNS_MAIN, ESP_NETIF_DNS_BACKUP};
+    for (int i = 0; i < 2; i++)
+    {
+        esp_netif_dns_info_t info = {};
+        if (esp_netif_get_dns_info(netif, types[i], &info) == ESP_OK &&
+            info.ip.u_addr.ip4.addr != 0)
+        {
+            dns_setserver(static_cast<uint8_t>(i), reinterpret_cast<const ip_addr_t *>(&info.ip));
+        }
     }
 }
 
@@ -71,6 +93,17 @@ bool EthWiFiManager::begin(const Config &config)
             }
         }
 
+        if (m_wifiEnabled)
+        {
+            // Set the flag BEFORE calling initEthernet() / esp_eth_start().
+            // ETH event handlers (ETHERNET_EVENT_START, ETHERNET_EVENT_DISCONNECTED)
+            // fire on a higher-priority FreeRTOS task and can pre-empt begin()
+            // *during* initEthernet().  Without this guard they would call
+            // startWiFi() before begin() does, causing a duplicate WiFi.begin()
+            // and ESP_ERR_WIFI_STATE errors.
+            m_wifiFallbackActive = true;
+        }
+
         if (ethernetOk && !initEthernet())
         {
             return false;
@@ -79,6 +112,9 @@ bool EthWiFiManager::begin(const Config &config)
 
     if (m_wifiEnabled)
     {
+        // Single, authoritative startWiFi() call for the whole boot sequence.
+        // m_wifiFallbackActive is already set above when ETH is enabled,
+        // so ETH event handlers will not try to start WiFi a second time.
         startWiFi();
     }
     ESP_LOGI(m_config.logTag, "Manager started (ethernet=%s, wifi=%s)",
@@ -1004,6 +1040,13 @@ bool EthWiFiManager::initEthernet()
         return false;
     }
 
+    err = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, &EthWiFiManager::ipEventThunk, this);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(m_config.logTag, "register IP_EVENT_ETH_LOST_IP failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
     esp_eth_mac_t *mac = nullptr;
     esp_eth_phy_t *phy = nullptr;
 
@@ -1043,6 +1086,7 @@ bool EthWiFiManager::initEthernet()
         eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
         phyCfg.phy_addr             = m_config.ethernet.emacPhyAddr;
         phyCfg.reset_gpio_num       = m_config.ethernet.emacPhyResetPin;
+        phyCfg.autonego_timeout_ms  = m_config.ethernet.emacAutoNegoTimeoutMs;
 
         switch (m_config.ethernet.emacPhyChip)
         {
@@ -1196,6 +1240,12 @@ bool EthWiFiManager::initEthernet()
     } // end SPI block
 
     esp_eth_config_t ethCfg = ETH_DEFAULT_CONFIG(mac, phy);
+#if ETHWIFI_INTERNAL_EMAC
+    if (m_config.ethernet.mode == EthernetMode::InternalEmac)
+    {
+        ethCfg.check_link_period_ms  = m_config.ethernet.emacLinkCheckPeriodMs;
+    }
+#endif
     err = esp_eth_driver_install(&ethCfg, &m_ethHandle);
     if (err != ESP_OK)
     {
@@ -1312,6 +1362,19 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
             if (m_config.ethernet.useDhcp)
             {
                 esp_netif_dhcpc_start(m_ethNetif);
+                // IDF may promote the ETH netif to "default" as soon as its
+                // link is up, routing all traffic (including DNS) via ETH even
+                // though DHCP has not completed and ETH has no IP yet.
+                // Reassert WiFi as the default route to keep outbound traffic
+                // flowing while DHCP negotiates (LAN8720 boot jitter fix).
+                if (m_wifiEnabled)
+                {
+                    esp_netif_t *wifiNif = wifiNetif();
+                    if (wifiNif != nullptr && WiFi.status() == WL_CONNECTED)
+                    {
+                        esp_netif_set_default_netif(wifiNif);
+                    }
+                }
             }
             else
             {
@@ -1348,6 +1411,8 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
                     ESP_LOGI(m_config.logTag, "[ETH] Static IP applied");
                     fireEvent(Event::EthGotIP, m_config.ethernet.localIP);
                     fireEvent(Event::InterfaceChanged, m_config.ethernet.localIP);
+                    esp_netif_set_default_netif(m_ethNetif);
+                    applyDnsFromNetif(m_ethNetif);
 #if defined(ETHWIFI_AP_ROUTER)
                     if (m_apRouterMode)
                     {
@@ -1375,18 +1440,33 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
         {
             if (m_wifiEnabled)
             {
-                ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
-                // If WiFi already has an IP there is nothing to do: it is already the
-                // active route.  Calling startWiFi() here would force a spurious
-                // disconnect + reconnect cycle that breaks connectivity during transient
-                // ETH link flaps (e.g. the LAN8720 boot-time auto-negotiation jitter).
-                if (WiFi.status() != WL_CONNECTED)
+                if (WiFi.status() == WL_CONNECTED)
                 {
-                    startWiFi();
+                    // WiFi already has an IP and is actively routing — nothing to do.
+                    ESP_LOGD(m_config.logTag, "[WiFi] Already connected, keeping existing connection");
+                    // Explicitly restore WiFi as the default route.  IDF may have
+                    // silently promoted ETH to default when its link came up (even
+                    // without an IP), blackholing DNS queries and all outbound pings.
+                    esp_netif_t *wifiNif = wifiNetif();
+                    if (wifiNif != nullptr)
+                    {
+                        esp_netif_set_default_netif(wifiNif);
+                        applyDnsFromNetif(wifiNif);
+                    }
+                }
+                else if (m_wifiFallbackActive)
+                {
+                    // startWiFi() was already called for this ETH down-episode.
+                    // Don't call it again — the WiFi stack is already connecting.
+                    // This prevents a reconnect storm during LAN8720 boot-time
+                    // auto-negotiation jitter (rapid ETH link flaps every ~500 ms).
+                    ESP_LOGD(m_config.logTag, "[WiFi] Fallback already in progress");
                 }
                 else
                 {
-                    ESP_LOGD(m_config.logTag, "[WiFi] Already connected, keeping existing connection");
+                    m_wifiFallbackActive = true;
+                    ESP_LOGI(m_config.logTag, "[WiFi] Fallback active");
+                    startWiFi();
                 }
             }
             else
@@ -1398,6 +1478,9 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
 
     case ETHERNET_EVENT_START:
         ESP_LOGD(m_config.logTag, "[ETH] Driver started");
+        // WiFi is started by begin() as the single authoritative call;
+        // m_wifiFallbackActive is set before initEthernet() so this handler
+        // never races with begin().
         break;
 
     default:
@@ -1410,9 +1493,23 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
     if (eventId == IP_EVENT_ETH_GOT_IP)
     {
         auto *ev = static_cast<ip_event_got_ip_t *>(eventData);
+        // Discard stale DHCP completions: the DHCP ACK can arrive after
+        // ETHERNET_EVENT_DISCONNECTED has already fired (the offer/ACK was
+        // in-flight when the link went down).  If we honour it we call
+        // stopWiFi() and point DNS at an unreachable ETH gateway.
+        if (!m_ethLinkUp)
+        {
+            ESP_LOGW(m_config.logTag, "[ETH] Ignoring late DHCP completion (link already down)");
+            return;
+        }
         ESP_LOGI(m_config.logTag, "[ETH] IP=" IPSTR " GW=" IPSTR " MASK=" IPSTR " route=Ethernet",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
         m_ethHasIp = true;
+        m_wifiFallbackActive = false; // ETH is now up and routable; reset for any future down-episode
+        // Set ETH as the default route and push its DHCP-provided DNS to the
+        // global slots so getaddrinfo() resolves through the Ethernet path.
+        esp_netif_set_default_netif(m_ethNetif);
+        applyDnsFromNetif(m_ethNetif);
         {
             const IPAddress ethIp(ev->ip_info.ip.addr);
             fireEvent(Event::EthGotIP, ethIp);
@@ -1438,6 +1535,11 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
         {
             ESP_LOGI(m_config.logTag, "[WiFi] IP=" IPSTR " GW=" IPSTR " MASK=" IPSTR " route=WiFi",
                      IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw), IP2STR(&ev->ip_info.netmask));
+            // Set WiFi as the explicit default route and push its DHCP DNS to
+            // the global slots so getaddrinfo() resolves via WiFi.
+            esp_netif_t *wifiNif = wifiNetif();
+            esp_netif_set_default_netif(wifiNif);
+            applyDnsFromNetif(wifiNif);
             const IPAddress wifiIp(ev->ip_info.ip.addr);
             fireEvent(Event::WiFiGotIP, wifiIp);
             fireEvent(Event::InterfaceChanged, wifiIp);
@@ -1452,6 +1554,48 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
     if (eventId == IP_EVENT_STA_LOST_IP)
     {
         ESP_LOGW(m_config.logTag, "[WiFi] Lost IP");
+        return;
+    }
+
+    if (eventId == IP_EVENT_ETH_LOST_IP)
+    {
+        // This fires when the ETH IP address is released (cable pulled, DHCP
+        // lease expired, etc.).  It is a reliable safety net for the case where
+        // ETHERNET_EVENT_DISCONNECTED was missed by the IDF EMAC driver.
+        ESP_LOGW(m_config.logTag, "[ETH] Lost IP");
+        m_ethHasIp  = false;
+        m_ethLinkUp = false;  // treat link as gone — ETHERNET_EVENT_DISCONNECTED may never arrive
+        fireEvent(Event::EthLinkDown);
+        fireEvent(Event::InterfaceChanged);
+#if defined(ETHWIFI_AP_ROUTER)
+        if (!m_apRouterMode)
+#endif
+        {
+            if (m_wifiEnabled)
+            {
+                if (WiFi.status() == WL_CONNECTED)
+                {
+                    ESP_LOGD(m_config.logTag, "[WiFi] Already connected, keeping existing connection");
+                    esp_netif_t *wifiNif = wifiNetif();
+                    if (wifiNif != nullptr)
+                    {
+                        esp_netif_set_default_netif(wifiNif);
+                        applyDnsFromNetif(wifiNif);
+                    }
+                }
+                else if (m_wifiFallbackActive)
+                {
+                    ESP_LOGD(m_config.logTag, "[WiFi] Fallback already in progress");
+                }
+                else
+                {
+                    m_wifiFallbackActive = true;
+                    ESP_LOGI(m_config.logTag, "[WiFi] Fallback active (ETH Lost IP)");
+                    startWiFi();
+                }
+            }
+        }
+        return;
     }
 }
 
@@ -1479,9 +1623,26 @@ void EthWiFiManager::onWiFiEvent(int32_t eventId)
 
     if (!m_ethHasIp)
     {
-        ESP_LOGW(m_config.logTag, "[WiFi] Disconnected, reconnecting...");
-        fireEvent(Event::InterfaceChanged);
-        esp_wifi_connect();
+        if (m_ethLinkUp)
+        {
+            // ETH link is currently up (boot-time autoneg jitter or re-establishing).
+            // Don't hammer WiFi reconnects — the ETH driver is still settling.
+            ESP_LOGD(m_config.logTag, "[WiFi] Disconnected (ETH link active, waiting for ETH to settle)");
+        }
+        else if (m_config.wifi.autoReconnect)
+        {
+            // autoReconnect is enabled: the Arduino WiFi library handles retries internally
+            // via its own WIFI_EVENT_STA_DISCONNECTED handler.  Calling esp_wifi_connect()
+            // here as well would race with that handler, producing ESP_ERR_WIFI_STATE /
+            // ESP_ERR_WIFI_CONN errors and a STA_LEAVING (reason 36) storm.
+            ESP_LOGD(m_config.logTag, "[WiFi] Disconnected, autoReconnect will retry");
+        }
+        else
+        {
+            ESP_LOGW(m_config.logTag, "[WiFi] Disconnected, reconnecting...");
+            fireEvent(Event::InterfaceChanged);
+            esp_wifi_connect();
+        }
         return;
     }
 
