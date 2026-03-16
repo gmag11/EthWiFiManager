@@ -197,6 +197,13 @@ public:
         gpio_num_t emacPhyResetPin = GPIO_NUM_NC;        ///< Active-low PHY reset, or GPIO_NUM_NC
         gpio_num_t emacRmiiRefClkPin = GPIO_NUM_0;       ///< REF_CLK pin — GPIO0 typical for external input
         bool emacRmiiClockExtInput = true;               ///< true = PHY drives REF_CLK (most boards)
+        /// Auto-negotiation timeout in ms (eth_phy_config_t::autonego_timeout_ms).
+        /// IDF default: 4000. Reduce to 1000–2000 to speed up link recovery after a link flap.
+        uint32_t emacAutoNegoTimeoutMs = 4000;
+        /// How often the driver polls the PHY for link state changes, in ms
+        /// (esp_eth_config_t::check_link_period_ms). IDF default: 2000.
+        /// Reduce to 500–1000 to detect cable plug/unplug events faster.
+        uint32_t emacLinkCheckPeriodMs = 2000;
 #endif
 
         bool useDhcp = true;
@@ -400,6 +407,11 @@ private:
 
     volatile bool m_ethHasIp = false;
     volatile bool m_ethLinkUp = false;
+    /// True once WiFi fallback has been triggered (startWiFi called) for the
+    /// current Ethernet down-episode.  Prevents repeated startWiFi() calls
+    /// during LAN8720 boot-time auto-negotation jitter (rapid ETH link flaps).
+    /// Cleared when ETH successfully obtains an IP address.
+    bool m_wifiFallbackActive = false;
 
     bool m_wifiEnabled = true;   ///< false after disableWiFi(); suppresses auto-reconnect
     bool m_apActive    = false;  ///< true when soft-AP is running

@@ -70,6 +70,11 @@ void setup()
     config.ethernet.emacPhyResetPin       = GPIO_NUM_16;  // Power/reset — GPIO16 on WT32-ETH01/ETH02
     config.ethernet.emacRmiiRefClkPin     = GPIO_NUM_0;   // REF_CLK input from on-board oscillator
     config.ethernet.emacRmiiClockExtInput = true;          // External 50 MHz oscillator drives REF_CLK
+    // Reduce auto-neg timeout and link-check period to speed up link detection and recovery.
+    // With IDF defaults (4000 + 2000 ms), each failed auto-neg cycle takes 6 s;
+    // ~5 cycles on cold start = ~30 s delay. Values below reduce that to ~5 s.
+    config.ethernet.emacAutoNegoTimeoutMs = 1500; // ms (IDF default: 4000)
+    config.ethernet.emacLinkCheckPeriodMs = 500;  // ms (IDF default: 2000)
 
     network.begin(config);
 }
