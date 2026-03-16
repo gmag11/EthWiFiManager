@@ -2,6 +2,9 @@
 
 #include <lwip/dns.h>
 #include <lwip/ip4_addr.h>
+#include <esp_idf_version.h>
+#include <esp_netif_net_stack.h>
+#include <lwip/netif.h>
 
 EthWiFiManager *EthWiFiManager::s_instance = nullptr;
 
@@ -37,6 +40,21 @@ static void applyDnsFromNetif(esp_netif_t *netif)
             dns_setserver(static_cast<uint8_t>(i), reinterpret_cast<const ip_addr_t *>(&info.ip));
         }
     }
+}
+
+/// Establece la interfaz de red por defecto de forma compatible con ESP-IDF 4.x y 5.x.
+/// esp_netif_set_default_netif() fue introducida en IDF 5.1; en versiones anteriores
+/// se usa netif_set_default() de LwIP obteniendo el puntero interno con esp_netif_get_netif_impl().
+static void setDefaultNetif(esp_netif_t *netif)
+{
+    if (netif == nullptr) return;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
+    esp_netif_set_default_netif(netif);
+#else
+    struct netif *lwip_netif = static_cast<struct netif *>(esp_netif_get_netif_impl(netif));
+    if (lwip_netif != nullptr)
+        netif_set_default(lwip_netif);
+#endif
 }
 
 static esp_ip4_addr_t toEspIp4(const IPAddress &ip)
@@ -1372,7 +1390,7 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
                     esp_netif_t *wifiNif = wifiNetif();
                     if (wifiNif != nullptr && WiFi.status() == WL_CONNECTED)
                     {
-                        esp_netif_set_default_netif(wifiNif);
+                        setDefaultNetif(wifiNif);
                     }
                 }
             }
@@ -1411,7 +1429,7 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
                     ESP_LOGI(m_config.logTag, "[ETH] Static IP applied");
                     fireEvent(Event::EthGotIP, m_config.ethernet.localIP);
                     fireEvent(Event::InterfaceChanged, m_config.ethernet.localIP);
-                    esp_netif_set_default_netif(m_ethNetif);
+                    setDefaultNetif(m_ethNetif);
                     applyDnsFromNetif(m_ethNetif);
 #if defined(ETHWIFI_AP_ROUTER)
                     if (m_apRouterMode)
@@ -1450,7 +1468,7 @@ void EthWiFiManager::onEthEvent(int32_t eventId)
                     esp_netif_t *wifiNif = wifiNetif();
                     if (wifiNif != nullptr)
                     {
-                        esp_netif_set_default_netif(wifiNif);
+                        setDefaultNetif(wifiNif);
                         applyDnsFromNetif(wifiNif);
                     }
                 }
@@ -1508,7 +1526,7 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
         m_wifiFallbackActive = false; // ETH is now up and routable; reset for any future down-episode
         // Set ETH as the default route and push its DHCP-provided DNS to the
         // global slots so getaddrinfo() resolves through the Ethernet path.
-        esp_netif_set_default_netif(m_ethNetif);
+        setDefaultNetif(m_ethNetif);
         applyDnsFromNetif(m_ethNetif);
         {
             const IPAddress ethIp(ev->ip_info.ip.addr);
@@ -1538,7 +1556,7 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
             // Set WiFi as the explicit default route and push its DHCP DNS to
             // the global slots so getaddrinfo() resolves via WiFi.
             esp_netif_t *wifiNif = wifiNetif();
-            esp_netif_set_default_netif(wifiNif);
+            setDefaultNetif(wifiNif);
             applyDnsFromNetif(wifiNif);
             const IPAddress wifiIp(ev->ip_info.ip.addr);
             fireEvent(Event::WiFiGotIP, wifiIp);
@@ -1579,7 +1597,7 @@ void EthWiFiManager::onIpEvent(int32_t eventId, void *eventData)
                     esp_netif_t *wifiNif = wifiNetif();
                     if (wifiNif != nullptr)
                     {
-                        esp_netif_set_default_netif(wifiNif);
+                        setDefaultNetif(wifiNif);
                         applyDnsFromNetif(wifiNif);
                     }
                 }
